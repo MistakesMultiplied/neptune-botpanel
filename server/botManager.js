@@ -98,6 +98,7 @@ class BotManager {
     initialize() {
         this.clearAllStopFlags();
         this.processInterval = setInterval(() => this.processQueue(), 1000);
+        this.startPeriodicCleanup();
         logger.info('Bot manager initialized');
         state.botAccounts = {};
     }
@@ -344,8 +345,15 @@ class BotManager {
             
             state.botStatuses[botNumber] = BotStatus.INJECTING;
             this.updateBotStatus(botNumber);
-            
-            await this.injectTextmodePreload(botNumber);
+
+            // Attempt textmode preload injection and abort if it fails
+            const textmodeInjected = await this.injectTextmodePreload(botNumber);
+            if (!textmodeInjected) {
+                logger.error(`Textmode injection failed for bot ${botNumber} – terminating bot`);
+                // Kill the bot cleanly to avoid rogue processes lingering
+                await instanceManager.stopBot(botNumber);
+                throw new Error('Textmode inject failed');
+            }
             
             logger.info(`Waiting for TF2 to initialize before injecting cheat...`);
             this.io.emit('logMessage', `Waiting for TF2 to initialize before injecting cheat...`);
@@ -408,6 +416,13 @@ class BotManager {
             
             state.botsStarting.delete(botNumber);
 
+            // If TF2 failed to launch or any injection step failed, immediately stop the bot
+            if (err.message && (err.message.includes('TF2') || err.message.includes('inject'))) {
+                try {
+                    await instanceManager.stopBot(botNumber);
+                } catch (_) {}
+            }
+            
             // Ensure processes are stopped on pipe timeout
             if (err.message.includes('Pipe connection timeout')) {
                 try {
@@ -450,29 +465,33 @@ class BotManager {
             this.loadAccounts();
         }
 
-        if (this.accounts.length === 0) return null;
-
-        // Build set of accounts currently assigned to running / starting bots
-        const usedUsernames = new Set();
-        Object.values(state.botAccounts || {}).forEach(acc => {
-            if (acc && acc.username) usedUsernames.add(acc.username);
-        });
-
-        // Prefer account previously mapped to this bot (during restart)
-        if (state.botAccounts && state.botAccounts[botNumber]) {
-            const prev = state.botAccounts[botNumber];
-            if (prev && !usedUsernames.has(prev.username)) return prev;
+        if (this.accounts.length === 0) {
+            logger.error(`No accounts loaded from accounts.txt`);
+            return null;
         }
 
-        // Return first free account
-        for (const acc of this.accounts) {
-            if (!usedUsernames.has(acc.username)) {
-                return acc;
-            }
+        // Line-based assignment: bot N uses account on line N (1-indexed)
+        const accountIndex = botNumber - 1; // Convert to 0-indexed array
+        
+        if (accountIndex < 0) {
+            logger.error(`Invalid bot number: ${botNumber} (must be >= 1)`);
+            return null;
+        }
+        
+        if (accountIndex >= this.accounts.length) {
+            logger.error(`Bot ${botNumber} requires account on line ${botNumber}, but only ${this.accounts.length} accounts available in accounts.txt`);
+            return null;
         }
 
-        // None free -> return null to indicate shortage
+        const account = this.accounts[accountIndex];
+        
+        if (!account || !account.username || !account.password) {
+            logger.error(`Invalid account on line ${botNumber} of accounts.txt`);
         return null;
+        }
+
+        logger.info(`Assigning account from line ${botNumber} (${account.username}) to bot ${botNumber}`);
+        return account;
     }
     
     async injectTextmodePreload(botNumber) {
@@ -700,6 +719,7 @@ class BotManager {
             state.botsStarting.delete(botNumber);
             
             let terminationResult = await instanceManager.stopBot(botNumber);
+            await this.forceCleanupBotResources(botNumber);
             
             state.botStatuses[botNumber] = BotStatus.STOPPED;
             this.updateBotStatus(botNumber);
@@ -721,6 +741,7 @@ class BotManager {
         
         if (state.activeBots.has(botNumber)) {
             let terminationResult = await instanceManager.stopBot(botNumber);
+            await this.forceCleanupBotResources(botNumber);
             
             state.botStatuses[botNumber] = BotStatus.STOPPED;
             this.updateBotStatus(botNumber);
@@ -745,6 +766,95 @@ class BotManager {
         this.botStopFlags.delete(botNumber);
         
         return false;
+    }
+
+    // Force cleanup of all resources for a specific bot
+    async forceCleanupBotResources(botNumber) {
+        logger.info(`Force cleaning up resources for bot ${botNumber}`);
+        
+        try {
+            // 1. Kill any Steam processes with this bot's IPC name
+            const steamIpcName = `steam_bot_${botNumber}`;
+            await this.killProcessesByCommandLine(`-master_ipc_name_override.*${steamIpcName}`);
+            
+            // 2. Kill any TF2 processes with this bot's IPC name  
+            await this.killProcessesByCommandLine(`-steamipcname.*${steamIpcName}`);
+            
+            // 3. Clear Source engine lock files
+            instanceManager.clearSourceLockFiles(botNumber);
+            
+            // 4. Clean up any orphaned processes for this bot
+            await this.killOrphanedBotProcesses(botNumber);
+            
+            // 5. Wait a moment for cleanup to complete
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            logger.info(`Resource cleanup completed for bot ${botNumber}`);
+        } catch (err) {
+            logger.error(`Error during force cleanup for bot ${botNumber}: ${err.message}`);
+        }
+    }
+
+    // Kill processes by command line pattern
+    async killProcessesByCommandLine(pattern) {
+        return new Promise((resolve) => {
+            try {
+                // Use PowerShell to find and kill processes by command line
+                const psCommand = `powershell -NoProfile -Command "Get-CimInstance -ClassName Win32_Process | Where-Object { $_.CommandLine -match '${pattern}' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"`;
+                
+                exec(psCommand, (error, stdout, stderr) => {
+                    if (error) {
+                        logger.debug(`Process cleanup command failed: ${error.message}`);
+                    } else {
+                        logger.debug(`Executed process cleanup for pattern: ${pattern}`);
+                    }
+                    resolve();
+                });
+            } catch (err) {
+                logger.error(`Error killing processes by command line: ${err.message}`);
+                resolve();
+            }
+        });
+    }
+
+    // Kill any orphaned processes that might belong to this bot
+    async killOrphanedBotProcesses(botNumber) {
+        return new Promise((resolve) => {
+            try {
+                // Kill processes that might be associated with this bot ID
+                const commands = [
+                    `taskkill /F /FI "WINDOWTITLE eq Steam - Bot ${botNumber}*" /T`,
+                    `taskkill /F /FI "WINDOWTITLE eq Team Fortress 2 - Bot ${botNumber}*" /T`,
+                    `wmic process where "CommandLine like '%BOTID=${botNumber}%'" delete`
+                ];
+                
+                let completed = 0;
+                const total = commands.length;
+                
+                commands.forEach(cmd => {
+                    exec(cmd, (error) => {
+                        if (error) {
+                            logger.debug(`Orphan cleanup command failed: ${error.message}`);
+                        }
+                        completed++;
+                        if (completed === total) {
+                            resolve();
+                        }
+                    });
+                });
+                
+                // Timeout after 5 seconds
+                setTimeout(() => {
+                    if (completed < total) {
+                        logger.debug(`Orphan cleanup timeout for bot ${botNumber}`);
+                        resolve();
+                    }
+                }, 5000);
+            } catch (err) {
+                logger.error(`Error killing orphaned processes: ${err.message}`);
+                resolve();
+            }
+        });
     }
     
     restartBot(botNumber) {
@@ -856,6 +966,8 @@ class BotManager {
             this.processInterval = null;
         }
         
+        this.stopPeriodicCleanup();
+        
         await this.stopAllBots();
         
         logger.info('Bot cleanup complete');
@@ -910,9 +1022,98 @@ class BotManager {
             }
         }
         
+        // Perform global cleanup after stopping all bots
+        await this.performGlobalCleanup();
+        
         this.globalStopFlag = false;
         
         return true;
+    }
+
+    // Perform comprehensive global cleanup of all bot resources
+    async performGlobalCleanup() {
+        logger.info('Performing global cleanup of bot resources...');
+        
+        try {
+            // 1. Kill all remaining Steam and TF2 processes that might be from bots
+            await this.killProcessesByCommandLine('-master_ipc_name_override.*steam_bot_');
+            await this.killProcessesByCommandLine('-steamipcname.*steam_bot_');
+            
+            // 2. Clear all Source engine lock files
+            instanceManager.clearSourceLockFiles();
+            
+            // 3. Clear all bot states (accounts will be reassigned by line number on restart)
+            state.activeBots.clear();
+            state.botsStarting.clear();
+            state.restartingBots.clear();
+            state.botAccounts = {}; // Clear but accounts will be reassigned by line-based logic
+            
+            // 4. Wait for cleanup to complete
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            logger.info('Global cleanup completed - accounts will be reassigned by line number when bots restart');
+            
+            if (this.io) {
+                this.io.emit('logMessage', 'Global resource cleanup completed');
+            }
+        } catch (err) {
+            logger.error(`Error during global cleanup: ${err.message}`);
+        }
+    }
+
+    // Add periodic cleanup task to prevent resource buildup
+    startPeriodicCleanup() {
+        // Run cleanup every 5 minutes
+        this.cleanupInterval = setInterval(async () => {
+            await this.performMaintenanceCleanup();
+        }, 5 * 60 * 1000);
+        
+        logger.info('Started periodic maintenance cleanup');
+    }
+
+    stopPeriodicCleanup() {
+        if (this.cleanupInterval) {
+            clearInterval(this.cleanupInterval);
+            this.cleanupInterval = null;
+            logger.info('Stopped periodic maintenance cleanup');
+        }
+    }
+
+    // Perform maintenance cleanup without stopping bots
+    async performMaintenanceCleanup() {
+        logger.debug('Performing maintenance cleanup...');
+        
+        try {
+            // Clear orphaned Source engine lock files
+            instanceManager.clearSourceLockFiles();
+            
+            // Clean up any stale bot states that don't have active processes
+            let cleanedStates = 0;
+            Object.keys(state.botStatuses).forEach(botNum => {
+                const botNumber = parseInt(botNum);
+                if (!state.activeBots.has(botNumber) && 
+                    !state.botsStarting.has(botNumber) && 
+                    !this.botProcessQueue.includes(botNumber)) {
+                    
+                    // Only clean up if bot has been in stopped state for a while
+                    if (state.botStatuses[botNumber] === BotStatus.STOPPED) {
+                        delete state.botStatuses[botNumber];
+                        delete state.pipeStatuses[botNumber];
+                        delete state.lastHeartbeats[botNumber];
+                        delete state.botAccounts[botNumber];
+                        cleanedStates++;
+                    }
+                }
+            });
+            
+            if (cleanedStates > 0) {
+                logger.info(`Cleaned up ${cleanedStates} stale bot states during maintenance`);
+            }
+            
+            logger.debug('Maintenance cleanup completed');
+        } catch (err) {
+            logger.error(`Error during maintenance cleanup: ${err.message}`);
+        }
     }
 
     debugSteam(botNumber) {
@@ -921,46 +1122,57 @@ class BotManager {
 
     // Try to detect TF2 process for a given bot by scanning running tf_win64.exe command lines
     getTF2ProcessIdAdvanced(botNumber) {
-        // 1) Ask instanceManager first
+        /*
+         * We try multiple strategies to locate the TF2 process that belongs to a specific bot.
+         * Priority order:
+         *   1. InstanceManager cache (fastest, if we already tracked the PID)
+         *   2. PowerShell CIM query filtered by the unique –steamipcname value
+         *   3. Legacy WMIC CSV scan (fallback for older systems)
+         */
+
+        const ipcName = `steam_bot_${botNumber}`;
+
+        // 1) Ask InstanceManager cache first
         let pid = instanceManager.getBotTF2ProcessId(botNumber);
         if (pid) return pid;
 
-        // 2) Fallback: WMIC scan by -steamipcname argument
+        // 2) PowerShell (preferred – WMIC is deprecated on new Windows builds)
         try {
-            const ipcName = `steam_bot_${botNumber}`;
-            const output = execSync(`wmic process where (Name='tf_win64.exe') get ProcessId,CommandLine /format:csv`, { encoding: 'utf8' });
-            const lines = output.split(/\r?\n/).filter(Boolean);
-            for (const line of lines) {
-                if (!line.includes(',')) continue;
-                const parts = line.split(','); // Node,ProcessId,CommandLine
-                const cmdline = parts.slice(2).join(',');
-                if (cmdline.includes(ipcName)) {
-                    const pidStr = parts[parts.length - 2] || parts[1]; // depending on wmic version
-                    const found = parseInt(pidStr, 10);
-                    if (!isNaN(found)) return found;
-                }
+            const psCmd = `powershell -NoProfile -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='tf_win64.exe'\\" | Where-Object { $_.CommandLine -match '${ipcName}' } | Sort-Object CreationDate -Descending | Select-Object -First 1 -ExpandProperty ProcessId"`;
+            const psOut = execSync(psCmd, { encoding: 'utf8' }).trim();
+            const psPid = parseInt(psOut, 10);
+            if (!isNaN(psPid) && psPid > 0) {
+                return psPid;
             }
         } catch (err) {
-            logger.debug(`WMIC scan failed for bot ${botNumber}: ${err.message}`);
+            logger.debug(`PowerShell scan failed for bot ${botNumber}: ${err.message}`);
         }
 
-        /* Fallback: PowerShell Get-CimInstance (Windows 10/11 without wmic) */
+        // 3) WMIC CSV fallback for older Windows versions
         try {
-            const ipcName = `steam_bot_${botNumber}`;
-            const psCmd = `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'tf_win64.exe' } | Select-Object ProcessId,CommandLine | ConvertTo-Json"`;
-            const psOut = execSync(psCmd, { encoding: 'utf8' });
-            if (psOut && psOut.trim()) {
-                const entries = JSON.parse(psOut);
-                const list = Array.isArray(entries) ? entries : [entries];
-                for (const proc of list) {
-                    if (proc.CommandLine && proc.CommandLine.includes(ipcName)) {
-                        const found = parseInt(proc.ProcessId, 10);
-                        if (!isNaN(found)) return found;
+            const wmicCmd = `wmic process where (Name='tf_win64.exe') get ProcessId,CommandLine /format:csv`;
+            const output = execSync(wmicCmd, { encoding: 'utf8' });
+            const rows = output.split(/\r?\n/).filter(r => r.trim().length > 0 && r.includes(','));
+
+            // WMIC doesn't guarantee ordering, sort rows by PID DESC to prefer newest processes (most likely our bot)
+            rows.sort((a, b) => {
+                const pidA = parseInt(a.split(',')[1], 10);
+                const pidB = parseInt(b.split(',')[1], 10);
+                return pidB - pidA;
+            });
+
+            for (const row of rows) {
+                const [, pidStr, ...cmdParts] = row.split(','); // Node name discarded, pid is 2nd column
+                const cmdline = cmdParts.join(',');
+                if (cmdline.includes(ipcName)) {
+                    const found = parseInt(pidStr, 10);
+                    if (!isNaN(found)) {
+                        return found;
                     }
                 }
             }
         } catch (err) {
-            logger.debug(`PowerShell scan failed for bot ${botNumber}: ${err.message}`);
+            logger.debug(`WMIC scan failed for bot ${botNumber}: ${err.message}`);
         }
 
         return null;
@@ -983,6 +1195,159 @@ class BotManager {
             };
             check();
         });
+    }
+
+    // Emergency cleanup function - use when bots are getting environment conflicts
+    async emergencyCleanup() {
+        logger.warn('EMERGENCY CLEANUP: Force cleaning all bot resources...');
+        
+        if (this.io) {
+            this.io.emit('logMessage', 'EMERGENCY CLEANUP: Cleaning all bot resources...');
+        }
+        
+        try {
+            // 1. Stop all bot processes immediately
+            this.globalStopFlag = true;
+            
+            // 2. Kill ALL Steam and TF2 processes that could be from bots
+            logger.info('Killing all Steam and TF2 bot processes...');
+            await this.killAllBotProcesses();
+            
+            // 3. Clear all lock files and temporary files
+            logger.info('Clearing all lock files...');
+            instanceManager.clearSourceLockFiles();
+            this.clearTempFiles();
+            
+            // 4. Reset all state
+            logger.info('Resetting all bot state...');
+            this.resetAllBotState();
+            
+            // 5. Clean up account mappings
+            logger.info('Cleaning up account mappings...');
+            state.botAccounts = {};
+            
+            // 6. Wait for cleanup to complete
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            this.globalStopFlag = false;
+            
+            logger.warn('EMERGENCY CLEANUP COMPLETED - You can now start bots again');
+            
+            if (this.io) {
+                this.io.emit('logMessage', 'EMERGENCY CLEANUP COMPLETED - Ready to start bots');
+            }
+            
+            return true;
+        } catch (err) {
+            logger.error(`Error during emergency cleanup: ${err.message}`);
+            
+            if (this.io) {
+                this.io.emit('logMessage', `Emergency cleanup error: ${err.message}`);
+            }
+            
+            return false;
+        }
+    }
+
+    // Kill all bot-related processes
+    async killAllBotProcesses() {
+        const commands = [
+            // Kill all Steam processes with bot IPC names
+            `powershell -NoProfile -Command "Get-Process | Where-Object {$_.ProcessName -eq 'steam' -and $_.MainWindowTitle -like '*bot*'} | Stop-Process -Force"`,
+            
+            // Kill all TF2 processes with bot IPC names  
+            `powershell -NoProfile -Command "Get-Process | Where-Object {$_.ProcessName -eq 'tf_win64'} | Stop-Process -Force"`,
+            
+            // Kill processes by command line patterns
+            `powershell -NoProfile -Command "Get-CimInstance -ClassName Win32_Process | Where-Object { $_.CommandLine -match 'steam_bot_' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"`,
+            
+            // Kill all VAC bypass processes
+            `taskkill /F /IM "VAC-Bypass-Loader.exe" /T`,
+            `taskkill /F /IM "attach.exe" /T`,
+            
+            // Kill processes with BOTID environment variable
+            `wmic process where "CommandLine like '%BOTID=%'" delete`
+        ];
+        
+        const promises = commands.map(cmd => {
+            return new Promise(resolve => {
+                exec(cmd, (error) => {
+                    if (error) {
+                        logger.debug(`Emergency cleanup command failed: ${error.message}`);
+                    }
+                    resolve();
+                });
+            });
+        });
+        
+        await Promise.all(promises);
+        
+        // Wait for processes to fully terminate
+        await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+
+    // Clear temporary files that might cause conflicts
+    clearTempFiles() {
+        try {
+            const tempDir = require('os').tmpdir();
+            const patterns = [
+                'source_engine*.lock',
+                'steam_*.tmp',
+                'tf2_*.tmp'
+            ];
+            
+            const fs = require('fs');
+            patterns.forEach(pattern => {
+                try {
+                    const files = fs.readdirSync(tempDir);
+                    files.forEach(file => {
+                        if (file.match(pattern.replace('*', '.*'))) {
+                            const filePath = path.join(tempDir, file);
+                            try {
+                                fs.unlinkSync(filePath);
+                                logger.debug(`Deleted temp file: ${filePath}`);
+                            } catch (_) {
+                                // Ignore files that can't be deleted
+                            }
+                        }
+                    });
+                } catch (_) {
+                    // Ignore directory read errors
+                }
+            });
+        } catch (err) {
+            logger.debug(`Error clearing temp files: ${err.message}`);
+        }
+    }
+
+    // Reset all bot state to clean slate
+    resetAllBotState() {
+        // Clear all bot collections
+        state.activeBots.clear();
+        state.botsStarting.clear();
+        state.restartingBots.clear();
+        
+        // Clear process queue
+        this.botProcessQueue = [];
+        
+        // Clear stop flags
+        this.botStopFlags.clear();
+        
+        // Reset bot statuses
+        state.botStatuses = {};
+        
+        // Clear pipe connections and statuses
+        state.pipeConnections.clear();
+        state.pipeStatuses = {};
+        state.lastHeartbeats = {};
+        
+        // Clear instance tracking
+        state.instances.clear();
+        
+        // Clear account mappings (will be reassigned by line-based logic)
+        state.botAccounts = {};
+        
+        logger.info('All bot state has been reset - accounts will be reassigned by line number');
     }
 }
 

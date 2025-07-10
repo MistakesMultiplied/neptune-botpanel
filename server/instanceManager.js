@@ -1,4 +1,6 @@
-const { exec, spawn } = require('child_process');
+// Child process utilities
+// Added execSync to allow synchronous PowerShell execution for mutex cleanup
+const { exec, spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -33,8 +35,15 @@ class InstanceManager {
         // Store IO reference for status updates
         this.io = null;
         
+        // TF2 Process Scanner for rogue processes
+        this.tf2ScannerInterval = null;
+        this.lastTF2ScanTime = 0;
+        
         // Ensure instances directory exists
         this.ensureInstancesDirectory();
+        
+        // Start TF2 process scanner
+        this.startTF2ProcessScanner();
     }
 
     // --- Utility: clear Source engine lock files in temp dir (Windows/Linux) ---
@@ -73,6 +82,44 @@ class InstanceManager {
             logger.info(`Deleted ${totalDeleted} Source engine lock file(s) for bot ${botNumber !== null ? botNumber : 'global'}`);
         }
     }
+
+    /**
+     * Release lingering Source Engine named mutexes that can prevent multiple game instances.
+     * Works only on Windows – silently no-ops on other platforms.
+     * This uses a short, synchronous PowerShell script to open and immediately close
+     * the well-known mutex names used by Source games. When no process holds a handle
+     * to those mutexes, closing them effectively removes the kernel object, lifting
+     * the single-instance restriction. If another process still owns the handle the
+     * call is harmless.
+     */
+    releaseSourceEngineMutexes() {
+        if (process.platform !== 'win32') {
+            return; // Only relevant on Windows
+        }
+
+        try {
+            const mutexNames = [
+                'SourceEngineMutex',
+                'hl2_singleton_mutex',
+                'SteamMasterPipeMutex'
+            ];
+
+            // Build a small PowerShell script that attempts to open each mutex and
+            // then disposes the handle. Any errors (e.g., mutex not found) are ignored.
+            const psScript = mutexNames.map(name => `try { $m = [System.Threading.Mutex]::OpenExisting('${name}'); if ($m) { $m.Close(); } } catch { }`).join('; ');
+
+            execSync(`powershell -NoProfile -Command "${psScript}"`, {
+                stdio: 'ignore',
+                windowsHide: true,
+                timeout: 5000
+            });
+
+            logger.debug('Attempted to release Source Engine mutexes');
+        } catch (err) {
+            // Non-fatal – just log at debug level to avoid spam
+            logger.debug(`Mutex release error: ${err.message}`);
+        }
+    }
     
     // Set the Socket.IO instance for real-time updates
     setIO(io) {
@@ -96,17 +143,34 @@ class InstanceManager {
         const instanceDir = path.join(this.instancesDir, `bot${botNumber}`);
         
         try {
+            // Always recreate the instance directory to ensure clean state
             if (fs.existsSync(instanceDir)) {
-                logger.info(`Using existing instance directory for bot ${botNumber}`);
-                state.instances.set(botNumber, instanceDir);
-                return true;
+                logger.info(`Cleaning existing instance directory for bot ${botNumber}`);
+                try {
+                    // Only remove userdata and config to preserve Steam client files
+                    const userDataDir = path.join(instanceDir, 'userdata');
+                    const configDir = path.join(instanceDir, 'config');
+                    const logsDir = path.join(instanceDir, 'logs');
+                    
+                    if (fs.existsSync(userDataDir)) {
+                        fs.rmSync(userDataDir, { recursive: true, force: true });
+                    }
+                    if (fs.existsSync(configDir)) {
+                        fs.rmSync(configDir, { recursive: true, force: true });
+                    }
+                    if (fs.existsSync(logsDir)) {
+                        fs.rmSync(logsDir, { recursive: true, force: true });
             }
-            
+                } catch (cleanupErr) {
+                    logger.warn(`Failed to clean existing directories for bot ${botNumber}: ${cleanupErr.message}`);
+                }
+            } else {
             // Create instance directory structure
             fs.mkdirSync(instanceDir, { recursive: true });
+            }
             
-            // Create subdirectories
-            const subdirs = ['userdata', 'config', 'logs'];
+            // Create subdirectories with bot-specific names
+            const subdirs = ['userdata', 'config', 'logs', 'dumps', 'appcache'];
             subdirs.forEach(dir => {
                 const dirPath = path.join(instanceDir, dir);
                 fs.mkdirSync(dirPath, { recursive: true });
@@ -122,7 +186,7 @@ class InstanceManager {
                     fs.mkdirSync(instanceSteamDir, { recursive: true });
                     logger.info(`Copying Steam client to ${instanceSteamDir}`);
                     // Copy everything except heavy directories
-                    const skipDirs = ['steamapps', 'logs'];
+                    const skipDirs = ['steamapps', 'logs', 'userdata', 'config', 'dumps', 'appcache'];
                     const copyRecursiveSync = (src, dest) => {
                         const stats = fs.statSync(src);
                         const basename = path.basename(src);
@@ -150,6 +214,15 @@ class InstanceManager {
                     }
                 }
 
+                // Create bot-specific userdata, config, logs directories in Steam instance
+                const steamSubDirs = ['userdata', 'config', 'logs', 'dumps', 'appcache'];
+                steamSubDirs.forEach(dir => {
+                    const steamSubDir = path.join(instanceSteamDir, dir);
+                    if (!fs.existsSync(steamSubDir)) {
+                        fs.mkdirSync(steamSubDir, { recursive: true });
+                    }
+                });
+
                 // Disable Steam Client Service to avoid global tracking
                 const svcDll = path.join(instanceSteamDir, 'steamservice.dll');
                 if (fs.existsSync(svcDll)) {
@@ -160,14 +233,65 @@ class InstanceManager {
                         logger.warn(`Failed to rename steamservice.dll: ${dllErr.message}`);
                     }
                 }
+
+                // Create bot-specific registry.vdf to prevent Steam account conflicts
+                const registryFile = path.join(instanceSteamDir, 'registry.vdf');
+                if (fs.existsSync(registryFile)) {
+                    try {
+                        fs.unlinkSync(registryFile);
+                        logger.info(`Removed existing registry.vdf for bot ${botNumber}`);
+                    } catch (regErr) {
+                        logger.warn(`Failed to remove registry.vdf: ${regErr.message}`);
+                    }
+                }
+
+                // Create bot-specific config.vdf
+                const configFile = path.join(instanceSteamDir, 'config', 'config.vdf');
+                try {
+                    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+                    const configContent = `"InstallConfigStore"
+{
+    "Software"
+    {
+        "Valve"
+        {
+            "Steam"
+            {
+                "SourceModInstallPath"		""
+                "ToolInstallPath"		""
+                "AlreadyRetriedOfflineMode"		"0"
+                "StartupMode"		"0"
+                "SuppressFirstRunDialog"		"1"
+                "RunningOffline"		"0"
+                "BotInstance"		"${botNumber}"
+            }
+        }
+    }
+}`;
+                    fs.writeFileSync(configFile, configContent);
+                    logger.info(`Created bot-specific config.vdf for bot ${botNumber}`);
+                } catch (configErr) {
+                    logger.warn(`Failed to create config.vdf: ${configErr.message}`);
+                }
             } catch (steamErr) {
                 logger.warn(`Failed preparing Steam client for bot ${botNumber}: ${steamErr.message}`);
             }
             
             // Store reference to the instance
             state.instances.set(botNumber, instanceDir);
-            
-            logger.info(`Created instance directory for bot ${botNumber}: ${instanceDir}`);
+
+            // Pre-write launch option files so localconfig.vdf is already in place before Steam starts
+            try {
+                const launchOptionsString = this.getTF2LaunchArgs(botNumber).join(' ');
+                // Write both userdata localconfig and steam config files right away
+                this.setTF2LaunchOptions(botNumber, launchOptionsString);
+                this.writeSteamConfigLaunchOptions(botNumber, launchOptionsString);
+                logger.info(`Pre-wrote localconfig.vdf and config.vdf for bot ${botNumber}`);
+            } catch (preWriteErr) {
+                logger.warn(`Failed to pre-write launch options for bot ${botNumber}: ${preWriteErr.message}`);
+            }
+
+            logger.info(`Created isolated instance directory for bot ${botNumber}: ${instanceDir}`);
             return true;
         } catch (err) {
             logger.error(`Error creating instance for bot ${botNumber}: ${err.message}`);
@@ -227,25 +351,62 @@ class InstanceManager {
                 this.io.emit('logMessage', `Launching ${path.basename(program)} for bot ${botNumber}${isBackground ? ' (background)' : ''}`);
             }
             
-            // Set environment variables
+            // Set bot-specific environment variables
             let env = {
                 ...process.env,
-                BOTID: botNumber.toString()
+                BOTID: botNumber.toString(),
+                BOT_INSTANCE_ID: `bot_${botNumber}`,
+                STEAM_INSTANCE_PATH: state.instances.get(botNumber) || '',
+                // Clear any conflicting Steam environment variables
+                STEAM_COMPAT_CLIENT_INSTALL_PATH: undefined,
+                STEAM_COMPAT_DATA_PATH: undefined
             };
+
+            // Add bot-specific Steam environment for isolation
+            if (programFileName.includes('steam')) {
+                const instanceDir = state.instances.get(botNumber);
+                if (instanceDir) {
+                    const steamDir = path.join(instanceDir, 'steam');
+                    env.STEAM_COMPAT_CLIENT_INSTALL_PATH = steamDir;
+                    env.STEAM_COMPAT_DATA_PATH = path.join(instanceDir, 'userdata');
+                    env.STEAMAPPDATA = path.join(instanceDir, 'userdata');
+                    env.LOCALAPPDATA = path.join(instanceDir, 'config');
+                    env.TEMP = path.join(instanceDir, 'logs'); // Use bot-specific temp
+                    env.TMP = path.join(instanceDir, 'logs');
+                }
+            }
+
+            // Add TF2-specific environment isolation
+            if (programFileName.includes('tf_win64')) {
+                const instanceDir = state.instances.get(botNumber);
+                if (instanceDir) {
+                    env.TF2_INSTANCE_PATH = instanceDir;
+                    env.STEAMIPCNAME = `steam_bot_${botNumber}`;
+                    env.TEMP = path.join(instanceDir, 'logs');
+                    env.TMP = path.join(instanceDir, 'logs');
+                }
+            }
 
             if (options && options.extraEnv) {
                 env = { ...env, ...options.extraEnv };
             }
             
-            // Build spawn options
+            // Build spawn options with bot-specific working directory
+            const botInstanceDir = state.instances.get(botNumber);
             const spawnOptions = {
                 env,
                 detached: isBackground,
-                stdio: isBackground ? 'ignore' : 'inherit'
+                stdio: isBackground ? 'ignore' : 'inherit',
+                cwd: workingDirectory || botInstanceDir || process.cwd()
             };
             
-            if (workingDirectory) {
-                spawnOptions.cwd = workingDirectory;
+            // For Steam processes, ensure they use the bot's Steam directory
+            if (programFileName.includes('steam')) {
+                const instanceDir = state.instances.get(botNumber);
+                if (instanceDir) {
+                    spawnOptions.cwd = path.join(instanceDir, 'steam');
+                    logger.info(`Setting Steam working directory to: ${spawnOptions.cwd}`);
+                }
             }
             
             // For TF2 processes, also set working directory to instance directory
@@ -261,11 +422,15 @@ class InstanceManager {
             let child;
             if (isBackground) {
                 // For background processes, use start command with priority and affinity
-                // But we need to explicitly set environment variables for Windows start command
+                // Set all environment variables explicitly
                 let startCommand = 'cmd /c "';
                 
-                // Set BOTID environment variable explicitly
-                startCommand += `set BOTID=${botNumber} && `;
+                // Set environment variables explicitly for complete isolation
+                Object.entries(env).forEach(([key, value]) => {
+                    if (value !== undefined && value !== null) {
+                        startCommand += `set ${key}=${value} && `;
+                    }
+                });
                 
                 startCommand += 'start ""';
                 
@@ -319,7 +484,7 @@ class InstanceManager {
         });
         
         // Log process creation
-        logger.info(`Created process for bot ${botNumber}: PID=${child.pid}, program=${path.basename(program)}`);
+                logger.info(`Created isolated process for bot ${botNumber}: PID=${child.pid}, program=${path.basename(program)}, cwd=${spawnOptions.cwd}`);
                 
                 // Update status if this is TF2
                 if (program.includes('tf_win64')) {
@@ -371,11 +536,21 @@ class InstanceManager {
         state.botStatuses[botNumber] = BotStatus.STEAM_STARTING;
         this.broadcastBotStatus(botNumber);
 
-        // Write global launch options before starting Steam (ensures options present even on first run)
-        const preLaunchOptions = this.getTF2LaunchArgs(botNumber).join(' ');
-        this.writeSteamConfigLaunchOptions(botNumber, preLaunchOptions);
+        // Clear leftover Source Engine lock files and mutexes before starting Steam
+        this.clearSourceLockFiles(botNumber);
+        this.releaseSourceEngineMutexes();
 
-        // Schedule update of localconfig.vdf once userdata/<id>/config appears
+        const preLaunchOptions = this.getTF2LaunchArgs(botNumber).join(' ');
+        logger.info(`s ${botNumber} ===`);
+        logger.info(`Launch options: ${preLaunchOptions}`);
+        
+        for (let i = 0; i < 3; i++) {
+            this.writeSteamConfigLaunchOptions(botNumber, preLaunchOptions);
+            this.setTF2LaunchOptions(botNumber, preLaunchOptions);
+            logger.info(`Pre-Steam launch options write ${i + 1}/3 completed for bot ${botNumber}`);
+        }
+
+        // Schedule continuous monitoring and updating of localconfig.vdf
         this.scheduleLocalConfigUpdate(botNumber, preLaunchOptions);
 
         // Build login args if account provided
@@ -383,24 +558,40 @@ class InstanceManager {
         if (account && account.username && account.password) {
             args.push('-login', account.username, account.password);
         }
-        args.push('-nobootstrapupdate', '-nofriendsui', '-vgui', '-noreactlogin', `-master_ipc_name_override`, `steam_bot_${botNumber}`);
+        
+        // Add bot-specific isolation arguments
+        const steamIpcName = `steam_bot_${botNumber}`;
+        args.push('-nobootstrapupdate', '-nofriendsui', '-vgui', '-noreactlogin');
+        args.push(`-master_ipc_name_override`, steamIpcName);
         args.push('-cefNoGPU', '-cefDisableGPUCompositing');
         args.push('-installpath', path.join(state.instances.get(botNumber), 'steam'));
         args.push('-silent');                    // Run Steam in silent mode
-        args.push('-no-browser');               // Disable Steam browser
+        args.push('-nobrowser');           // Prevent Steam from attempting app updates while bots are running
+        args.push('-inhibitdownloads');          // Prevent Steam from attempting game updates while bots are running
+        
+        // Add environment isolation
+        args.push('-no-shared-data');            // Prevent shared data conflicts
+        args.push('-no-crash-handler');          // Disable crash reporting to prevent conflicts
+        
         // Append any extra debug args
         if (extraArgs && extraArgs.length) {
             args.push(...extraArgs);
         }
 
         // Launch Steam
-        logger.info(`Launching Steam for bot ${botNumber}`);
+        logger.info(`Launching Steam for bot ${botNumber} with IPC name: ${steamIpcName}`);
         return new Promise((resolve, reject) => {
             const process = this.launchProgram(botNumber, steamExePath, args, {
                 priority: 'idle',
                 cpuAffinity: '1',
                 workingDirectory: path.dirname(steamExePath),
-                isBackground: false
+                isBackground: false,
+                extraEnv: {
+                    // Add additional environment isolation
+                    STEAMIPCNAME: steamIpcName,
+                    STEAM_COMPAT_CLIENT_INSTALL_PATH: path.join(state.instances.get(botNumber), 'steam'),
+                    STEAM_INSTANCE_ID: `bot_${botNumber}`
+                }
             });
             if (!process) {
                 state.botStatuses[botNumber] = BotStatus.STEAM_ERROR;
@@ -409,15 +600,25 @@ class InstanceManager {
                 return;
             }
 
+            // Continue writing launch options AFTER Steam starts for 10 seconds
+            const afterLaunchInterval = setInterval(() => {
+                this.setTF2LaunchOptions(botNumber, preLaunchOptions);
+                this.writeSteamConfigLaunchOptions(botNumber, preLaunchOptions);
+                logger.debug(`Post-Steam launch options refresh for bot ${botNumber}`);
+            }, 1000);
+
             // Wait up to 20 s for Steam window to initialize
             const timeout = setTimeout(() => {
+                clearInterval(afterLaunchInterval);
                 state.botStatuses[botNumber] = BotStatus.STEAM_STARTING;
                 this.broadcastBotStatus(botNumber);
+                logger.info(`Steam initialization timeout reached for bot ${botNumber} - continuing`);
                 resolve(true);
             }, 20000);
 
             process.on('error', (err) => {
                 clearTimeout(timeout);
+                clearInterval(afterLaunchInterval);
                 state.botStatuses[botNumber] = BotStatus.STEAM_ERROR;
                 this.broadcastBotStatus(botNumber);
                 reject(err);
@@ -509,15 +710,12 @@ exec autoexec.cfg
         // Ensure common junction exists
         this.ensureSteamappsJunction(botNumber);
 
-        // Remove leftover Source engine lock files (prevents "only one instance" errors)
-        this.clearSourceLockFiles(botNumber);
+        // Ensure Source Engine mutexes are cleared before attempting the launch
+        this.releaseSourceEngineMutexes();
 
         // Update bot status
         state.botStatuses[botNumber] = BotStatus.TF2_STARTING;
         this.broadcastBotStatus(botNumber);
-
-        // Create bot identification files
-        this.createBotFile(botNumber);
 
         // Resolve Steam executable inside the bot instance
         const instanceDir = state.instances.get(botNumber);
@@ -567,6 +765,12 @@ exec autoexec.cfg
                     this.broadcastBotStatus(botNumber);
                 }
             }, 30000); // 30s grace period
+
+            // Run mutex cleanup again shortly after launch – this enables subsequent
+            // bot instances to start even while the current one is running.
+            setTimeout(() => {
+                this.releaseSourceEngineMutexes();
+            }, 5000);
 
             return process;
         }
@@ -700,6 +904,125 @@ exec autoexec.cfg
             clearInterval(this.monitorInterval);
             this.monitorInterval = null;
             logger.info('Process monitoring stopped');
+        }
+    }
+
+    // Start TF2 process scanner for rogue processes
+    startTF2ProcessScanner() {
+        if (this.tf2ScannerInterval) {
+            clearInterval(this.tf2ScannerInterval);
+        }
+        
+        // Scan every 10 seconds for rogue TF2 processes
+        this.tf2ScannerInterval = setInterval(() => {
+            this.scanAndTerminateRogueTF2Processes();
+        }, 10000);
+        
+        logger.info('TF2 Process Scanner started - will terminate TF2 processes without -textmode');
+    }
+    
+    // Stop TF2 process scanner
+    stopTF2ProcessScanner() {
+        if (this.tf2ScannerInterval) {
+            clearInterval(this.tf2ScannerInterval);
+            this.tf2ScannerInterval = null;
+            logger.info('TF2 Process Scanner stopped');
+        }
+    }
+    
+    // Scan for and terminate TF2 processes that don't have -textmode argument
+    async scanAndTerminateRogueTF2Processes() {
+        // Skip if scanning is disabled in config
+        if (state.config.disableTF2Scanner === true) {
+            return;
+        }
+        
+        // Throttle scanning - don't scan more than once every 5 seconds
+        const now = Date.now();
+        if (now - this.lastTF2ScanTime < 5000) {
+            return;
+        }
+        this.lastTF2ScanTime = now;
+        
+        try {
+            logger.debug('Scanning for rogue TF2 processes...');
+            
+            // Get all tf_win64.exe processes with their command lines using PowerShell
+            const psCommand = `powershell -NoProfile -Command "Get-CimInstance -ClassName Win32_Process -Filter \\"Name='tf_win64.exe'\\" | Select-Object ProcessId, CommandLine | ConvertTo-Json"`;
+            
+            const { exec } = require('child_process');
+            exec(psCommand, { timeout: 5000 }, (error, stdout, stderr) => {
+                if (error) {
+                    logger.debug(`TF2 scanner error: ${error.message}`);
+                    return;
+                }
+                
+                try {
+                    let processes = [];
+                    if (stdout.trim()) {
+                        const result = JSON.parse(stdout);
+                        processes = Array.isArray(result) ? result : [result];
+                    }
+                    
+                    if (processes.length === 0) {
+                        logger.debug('No TF2 processes found during scan');
+                        return;
+                    }
+                    
+                    logger.debug(`Found ${processes.length} TF2 process(es) during scan`);
+                    
+                    let terminatedCount = 0;
+                    let roguePIDs = [];
+                    
+                    for (const proc of processes) {
+                        const pid = proc.ProcessId;
+                        const cmdLine = proc.CommandLine || '';
+                        
+                        // Check if this process has -textmode argument
+                        const hasTextmode = cmdLine.toLowerCase().includes('-textmode');
+                        
+                        if (!hasTextmode) {
+                            logger.warn(`🚨 ROGUE TF2 DETECTED: PID ${pid} without -textmode`);
+                            logger.warn(`Command line: ${cmdLine}`);
+                            
+                            roguePIDs.push(pid);
+                            
+                            // Terminate the rogue process
+                            exec(`taskkill /F /PID ${pid}`, (killError) => {
+                                if (killError) {
+                                    logger.error(`Failed to terminate rogue TF2 PID ${pid}: ${killError.message}`);
+                                } else {
+                                    logger.warn(`✅ TERMINATED rogue TF2 process PID ${pid}`);
+                                    terminatedCount++;
+                                    
+                                    if (this.io) {
+                                        this.io.emit('logMessage', `🚨 Terminated rogue TF2 process PID ${pid} (no -textmode)`);
+                                    }
+                                }
+                            });
+                        } else {
+                            // This is a legitimate bot process
+                            logger.debug(`✅ Legitimate TF2 process: PID ${pid} (has -textmode)`);
+                        }
+                    }
+                    
+                    if (roguePIDs.length > 0) {
+                        logger.warn(`TF2 Scanner: Found ${roguePIDs.length} rogue processes, terminating: ${roguePIDs.join(', ')}`);
+                        
+                        if (this.io) {
+                            this.io.emit('logMessage', `TF2 Scanner: Terminated ${roguePIDs.length} rogue TF2 process(es) without -textmode`);
+                        }
+                    } else {
+                        logger.debug('TF2 Scanner: All TF2 processes are legitimate (have -textmode)');
+                    }
+                    
+                } catch (parseError) {
+                    logger.debug(`TF2 scanner parse error: ${parseError.message}`);
+                }
+            });
+            
+        } catch (err) {
+            logger.error(`TF2 scanner error: ${err.message}`);
         }
     }
     
@@ -1022,6 +1345,9 @@ exec autoexec.cfg
         // Stop process monitoring
         this.stopProcessMonitoring();
         
+        // Stop TF2 scanner
+        this.stopTF2ProcessScanner();
+        
         // Stop all bots
         const allBots = Array.from(this.processes.keys());
         const stopPromises = allBots.map(botNumber => this.stopBot(botNumber));
@@ -1036,6 +1362,26 @@ exec autoexec.cfg
         }
         
         logger.info('Instance cleanup complete');
+    }
+
+    // Toggle TF2 scanner functionality
+    toggleTF2Scanner(enabled) {
+        state.config.disableTF2Scanner = !enabled;
+        logger.info(`TF2 Process Scanner ${enabled ? 'enabled' : 'disabled'}`);
+        
+        // Save the setting to config
+        state.saveConfig();
+        
+        if (enabled) {
+            this.startTF2ProcessScanner();
+        } else {
+            this.stopTF2ProcessScanner();
+        }
+        
+        // Broadcast updated state to clients
+        if (this.io) {
+            this.io.emit('logMessage', `TF2 Process Scanner ${enabled ? 'enabled' : 'disabled'}`);
+        }
     }
 
     // Launch Steam in debug/update mode for a specific bot
@@ -1103,68 +1449,133 @@ exec autoexec.cfg
             if (!fs.existsSync(userdataRoot)) return;
 
             const sanitized = launchOptionsString.replace(/"/g, '');
-            const newContent = `"UserLocalConfigStore"\n{\n\t"Broadcast"\n\t{\n\t\t"Permissions"\t\t"0"\n\t}\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t\t"apps"\n\t\t\t\t{\n\t\t\t\t\t"440"\n\t\t\t\t\t{\n\t\t\t\t\t\t"LaunchOptions"\t\t"${sanitized}"\n\t\t\t\t\t\t"DisableOverlay"\t\t"1"\n\t\t\t\t\t\t"DisableCloudSync"\t\t"1"\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\t"system"\n\t\t\t\t{\n\t\t\t\t\t"EnableGameOverlay"\t\t"0"\n\t\t\t\t\t"DisableCloudSync"\t\t"1"\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}`;
+            
+            // Create proper localconfig.vdf structure based on user's file
+            const newContent = `"UserLocalConfigStore"
+{
+	"Broadcast"
+	{
+		"Permissions"		"0"
+	}
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"apps"
+				{
+					"440"
+					{
+						"LaunchOptions"		"${sanitized}"
+						"cloud"
+						{
+							"last_sync_state"		"synchronized"
+						}
+						"autocloud"
+						{
+							"lastlaunch"		"0"
+							"lastexit"		"0"
+						}
+					}
+				}
+			}
+		}
+	}
+	"system"
+	{
+		"EnableGameOverlay"		"0"
+		"PushToTalkKey"		"0"
+	}
+}`;
 
-            // Ensure each userdata/<id>/config/localconfig.vdf exists and has correct content
+            // Find all user ID directories and write localconfig.vdf
             const idDirs = fs.readdirSync(userdataRoot).filter(d => {
                 try {
-                    return fs.lstatSync(path.join(userdataRoot, d)).isDirectory();
+                    return fs.lstatSync(path.join(userdataRoot, d)).isDirectory() && /^\d+$/.test(d);
                 } catch (_) {
                     return false;
                 }
             });
-            idDirs.forEach(id => {
-                const cfgDir = path.join(userdataRoot, id, 'config');
-                try {
-                    fs.mkdirSync(cfgDir, { recursive: true });
-                    const cfgPath = path.join(cfgDir, 'localconfig.vdf');
-                    fs.writeFileSync(cfgPath, newContent);
-                    logger.info(`Zapisano localconfig.vdf dla bota ${botNumber}: ${cfgPath}`);
 
-                    // Also ensure <id>/440/localconfig.vdf exists (some tools expect it here)
+            if (idDirs.length === 0) {
+                // Create a dummy user ID directory if none exist
+                const dummyId = '1000000000';
+                const dummyDir = path.join(userdataRoot, dummyId);
+                fs.mkdirSync(dummyDir, { recursive: true });
+                idDirs.push(dummyId);
+                logger.info(`Created dummy user directory for bot ${botNumber}: ${dummyId}`);
+            }
+
+            let successCount = 0;
+            let totalFiles = 0;
+
+            idDirs.forEach(id => {
+                const configDir = path.join(userdataRoot, id, 'config');
+                try {
+                    fs.mkdirSync(configDir, { recursive: true });
+                    
+                    // Write main localconfig.vdf
+                    const configPath = path.join(configDir, 'localconfig.vdf');
+                    fs.writeFileSync(configPath, newContent);
+                    totalFiles++;
+                    
+                    // Verify it was written correctly
                     try {
-                        const app440Dir = path.join(userdataRoot, id, '440');
-                        fs.mkdirSync(app440Dir, { recursive: true });
-                        const appCfgPath = path.join(app440Dir, 'localconfig.vdf');
-                        fs.writeFileSync(appCfgPath, newContent);
-                        logger.debug(`Utworzono localconfig.vdf w katalogu 440: ${appCfgPath}`);
-                    } catch (err) {
-                        logger.debug(`Nie można zapisać 440/localconfig.vdf dla ${id}: ${err.message}`);
-                    }
+                        const verification = fs.readFileSync(configPath, 'utf8');
+                        if (verification.includes(sanitized)) {
+                            successCount++;
+                        }
+                    } catch (_) {}
+
+                    // Create multiple backups with different names
+                    const backupNames = [
+                        'localconfig_backup.vdf',
+                        'localconfig_bot.vdf', 
+                        `localconfig_bot${botNumber}.vdf`,
+                        'localconfig_protected.vdf'
+                    ];
+                    
+                    backupNames.forEach(backupName => {
+                        try {
+                            const backupPath = path.join(configDir, backupName);
+                            fs.writeFileSync(backupPath, newContent);
+                            totalFiles++;
+                        } catch (_) {}
+                    });
+                    
+                    // Also write to subdirectories in case Steam looks there
+                    const subDirs = ['7', '440', 'remote'];
+                    subDirs.forEach(subDir => {
+                        try {
+                            const subConfigDir = path.join(configDir, subDir);
+                            fs.mkdirSync(subConfigDir, { recursive: true });
+                            const subConfigPath = path.join(subConfigDir, 'localconfig.vdf');
+                            fs.writeFileSync(subConfigPath, newContent);
+                            totalFiles++;
+                        } catch (_) {}
+                    });
+                    
                 } catch (e) {
-                    logger.debug(`Failed write ${id}: ${e.message}`);
+                    logger.debug(`Error writing localconfig for bot ${botNumber}, user ${id}: ${e.message}`);
                 }
             });
-
-            // Recursively walk userdata and ensure EVERY directory contains an up-to-date localconfig.vdf
-            const walkAndEnsure = (dir) => {
-                try {
-                    // Always attempt to write/overwrite localconfig.vdf in current dir
-                    const target = path.join(dir, 'localconfig.vdf');
-                    try {
-                        fs.writeFileSync(target, newContent);
-                    } catch (err) {
-                        logger.debug(`Cannot write ${target}: ${err.message}`);
-                    }
-
-                    // Recurse into subfolders
-                    const entries = fs.readdirSync(dir, { withFileTypes: true });
-                    for (const entry of entries) {
-                        if (entry.isDirectory()) {
-                            walkAndEnsure(path.join(dir, entry.name));
-                        }
-                    }
-                } catch (_) {}
-            };
-
-            walkAndEnsure(userdataRoot);
 
             // Also ensure Steam Cloud is disabled in sharedconfig.vdf files
             this.disableSharedConfigCloud(botNumber);
 
-            logger.info(`Applied launch options & overlay/broadcast disable for bot ${botNumber}`);
+            // Log success rate periodically
+            const timestamp = Date.now();
+            if (!this.lastLogTime) this.lastLogTime = {};
+            if (!this.lastLogTime[botNumber] || timestamp - this.lastLogTime[botNumber] > 10000) {
+                logger.info(`Launch options protection for bot ${botNumber}: ${successCount}/${idDirs.length} verified, ${totalFiles} total files written`);
+                this.lastLogTime[botNumber] = timestamp;
+            }
+            
+            return successCount > 0;
         } catch (err) {
-            logger.warn(`setTF2LaunchOptions error: ${err.message}`);
+            logger.error(`setTF2LaunchOptions error for bot ${botNumber}: ${err.message}`);
+            return false;
         }
     }
 
@@ -1175,51 +1586,89 @@ exec autoexec.cfg
             clearInterval(this.localConfigIntervals.get(botNumber));
         }
 
+        logger.info(`Starting AGGRESSIVE localconfig monitoring for bot ${botNumber}`);
+        let writeCount = 0;
+
         const interval = setInterval(() => {
-            // Stop once the bot has reached the injection phase – by this point TF2 and textmode are initialised
+            writeCount++;
+            
+            // Stop once the bot has reached ACTIVE status and we've written at least 20 times
             const currentStatus = state.botStatuses[botNumber];
-            if (currentStatus && [BotStatus.INJECTING, BotStatus.INJECTED, BotStatus.INJECTION_ERROR].includes(currentStatus)) {
+            if (currentStatus === BotStatus.ACTIVE && writeCount >= 20) {
                 clearInterval(interval);
                 this.localConfigIntervals.delete(botNumber);
-                logger.debug(`Stopped localconfig updater for bot ${botNumber} (status = ${currentStatus})`);
+                logger.info(`Stopped aggressive localconfig monitoring for bot ${botNumber} after ${writeCount} writes (status = ${currentStatus})`);
+                return;
+            }
+            
+            // Stop if bot fails or after 2 minutes of trying
+            if (writeCount > 240 || (currentStatus && [BotStatus.CRASHED, BotStatus.STOPPED].includes(currentStatus))) {
+                clearInterval(interval);
+                this.localConfigIntervals.delete(botNumber);
+                logger.warn(`Stopped localconfig monitoring for bot ${botNumber} - bot failed or timeout (writes: ${writeCount})`);
                 return;
             }
 
             try {
-                // Continually (re)apply both launch-option files so that Steam never overwrites them
+                // AGGRESSIVELY write launch options every 500ms
                 this.setTF2LaunchOptions(botNumber, launchOptionsString);
                 this.writeSteamConfigLaunchOptions(botNumber, launchOptionsString);
+                
+                // Log every 10th write to avoid spam
+                if (writeCount % 10 === 0) {
+                    logger.info(`Aggressive localconfig write #${writeCount} for bot ${botNumber} (status: ${currentStatus})`);
+                }
 
-                // Verify at least one localconfig.vdf exists after write – once confirmed, continue looping but with no exit until injection
+                // Verify launch options are actually written correctly
                 const instanceDir = state.instances.get(botNumber);
                 if (!instanceDir) return;
+                
                 const userdataRoot = path.join(instanceDir, 'steam', 'userdata');
-                const matches = [];
-                const check = (dir) => {
-                    try {
-                        const entries = fs.readdirSync(dir, { withFileTypes: true });
-                        for (const e of entries) {
-                            const fp = path.join(dir, e.name);
-                            if (e.isDirectory()) check(fp);
-                            else if (e.isFile() && e.name.toLowerCase() === 'localconfig.vdf') matches.push(fp);
-                        }
-                    } catch(_){}
-                };
-                check(userdataRoot);
-                if (matches.length>0) {
-                    logger.debug(`localconfig.vdf confirmed for bot ${botNumber} (count=${matches.length})`);
+                if (fs.existsSync(userdataRoot)) {
+                    let foundCorrectOptions = false;
+                    const targetOptions = launchOptionsString.replace(/"/g, '');
+                    
+                    // Check if any localconfig.vdf contains our launch options
+                    const checkConfigFiles = (dir) => {
+                        try {
+                            const entries = fs.readdirSync(dir, { withFileTypes: true });
+                            for (const e of entries) {
+                                const fp = path.join(dir, e.name);
+                                if (e.isDirectory()) {
+                                    checkConfigFiles(fp);
+                                } else if (e.isFile() && e.name.toLowerCase() === 'localconfig.vdf') {
+                                    try {
+                                        const content = fs.readFileSync(fp, 'utf8');
+                                        if (content.includes(targetOptions)) {
+                                            foundCorrectOptions = true;
+                                        }
+                                    } catch (_) {}
+                                }
+                            }
+                        } catch(_) {}
+                    };
+                    
+                    checkConfigFiles(userdataRoot);
+                    
+                    if (foundCorrectOptions && writeCount % 20 === 0) {
+                        logger.info(`✓ Launch options verified in localconfig.vdf for bot ${botNumber}`);
+                    } else if (!foundCorrectOptions && writeCount % 5 === 0) {
+                        logger.warn(`✗ Launch options NOT found in localconfig.vdf for bot ${botNumber} - continuing writes...`);
+                    }
                 }
             } catch (err) {
-                logger.debug(`localconfig updater error for bot ${botNumber}: ${err.message}`);
+                logger.debug(`Aggressive localconfig write error for bot ${botNumber}: ${err.message}`);
             }
-        }, 500);
+        }, 500); // Write every 500ms
 
         this.localConfigIntervals.set(botNumber, interval);
+        logger.info(`Started aggressive localconfig interval for bot ${botNumber}`);
     }
 
     // Build array of default TF2 launch arguments for given bot
     getTF2LaunchArgs(botNumber) {
-        return [
+        // Default launch arguments that should always be included for bot operation
+        const defaultArgs = [
             '-steam',
             '-steamipcname', `steam_bot_${botNumber}`,
             '-sw',
@@ -1239,6 +1688,7 @@ exec autoexec.cfg
             '-threads 1',
             '-nobreakpad',
             '-reuse',
+            '-skipupdate',
             '-noquicktime',
             '-precachefontchars',
             '-particles 1',
@@ -1248,6 +1698,34 @@ exec autoexec.cfg
             '-wavonly',
             '-forcenovsync'
         ];
+
+        // User-configurable launch options from config
+        let userArgs = [];
+        if (state.config.tf2LaunchOptions) {
+            // Parse user's launch options string into array
+            userArgs = state.config.tf2LaunchOptions.split(' ').filter(arg => arg.trim().length > 0);
+        } else {
+            // If not configured, no additional user args (all defaults above)
+            userArgs = [];
+        }
+
+        // Combine default args with user args, removing duplicates
+        const allArgs = [...defaultArgs];
+        
+        // Add user args that don't conflict with default args
+        userArgs.forEach(arg => {
+            const argName = arg.startsWith('-') ? arg : `-${arg}`;
+            // Don't add if it conflicts with required bot args
+            const conflicts = ['-steam', '-steamipcname', '-textmode'];
+            const isConflict = conflicts.some(conflict => argName.startsWith(conflict));
+            
+            if (!isConflict && !allArgs.includes(argName)) {
+                allArgs.push(argName);
+            }
+        });
+
+        logger.debug(`Generated TF2 launch args for bot ${botNumber}: ${allArgs.join(' ')}`);
+        return allArgs;
     }
 
     // Write launch options into steam/config/config.vdf before Steam starts
@@ -1258,15 +1736,75 @@ exec autoexec.cfg
 
             const cfgDir = path.join(instanceDir, 'steam', 'config');
             fs.mkdirSync(cfgDir, { recursive: true });
-            const cfgPath = path.join(cfgDir, 'config.vdf');
 
             const sanitized = launchOptionsString.replace(/"/g, '');
-            const content = `"InstallConfigStore"\n{\n    "Software"\n    {\n        "Valve"\n        {\n            "Steam"\n            {\n                "Broadcast"\n                {\n                    "Permissions"\t\t"0"\n                }\n                "apps"\n                {\n                    "440"\n                    {\n                        "LaunchOptions"\t\t"${sanitized}"\n                        "DisableOverlay"\t\t"1"\n                    }\n                }\n            }\n        }\n    }\n}`;
+            const content = `"InstallConfigStore"
+{
+    "Software"
+    {
+        "Valve"
+        {
+            "Steam"
+            {
+                "Broadcast"
+                {
+                    "Permissions"		"0"
+                }
+                "apps"
+                {
+                    "440"
+                    {
+                        "LaunchOptions"		"${sanitized}"
+                        "AllowSkipGameUpdate"		"1"
+                        "DisableOverlay"		"1"
+                        "DisableCloudSync"		"1"
+                    }
+                }
+            }
+        }
+    }
+}`;
 
+            // Write main config file
+            const cfgPath = path.join(cfgDir, 'config.vdf');
             fs.writeFileSync(cfgPath, content);
-            logger.info(`Wrote pre-Steam LaunchOptions for bot ${botNumber}`);
+
+            // Create multiple backup files to protect against overwriting
+            const backupFiles = [
+                'config_backup.vdf',
+                'config_bot.vdf',
+                `config_bot${botNumber}.vdf`,
+                'config_protected.vdf',
+                'loginusers.vdf',  // Steam sometimes reads this
+                'InstallConfigStore.vdf'
+            ];
+
+            let backupCount = 0;
+            backupFiles.forEach(fileName => {
+                try {
+                    const backupPath = path.join(cfgDir, fileName);
+                    fs.writeFileSync(backupPath, content);
+                    backupCount++;
+                } catch (_) {}
+            });
+
+            // Also write to subdirectories
+            const subDirs = ['backup', 'apps', '440'];
+            subDirs.forEach(subDir => {
+                try {
+                    const subCfgDir = path.join(cfgDir, subDir);
+                    fs.mkdirSync(subCfgDir, { recursive: true });
+                    const subCfgPath = path.join(subCfgDir, 'config.vdf');
+                    fs.writeFileSync(subCfgPath, content);
+                    backupCount++;
+                } catch (_) {}
+            });
+
+            logger.debug(`Steam config protection for bot ${botNumber}: ${backupCount} backup files created`);
+            return true;
         } catch (err) {
             logger.warn(`writeSteamConfigLaunchOptions failed for bot ${botNumber}: ${err.message}`);
+            return false;
         }
     }
 
