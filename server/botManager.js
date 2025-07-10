@@ -11,6 +11,10 @@ class BotManager {
         this.botProcessQueue = [];
         this.processInterval = null;
         this.maxConcurrentStarts = state.config.maxConcurrentStarts || 2;
+
+        // Anti-IPC conflict delay (ms) between successive bot launches
+        this.ipcConflictDelay = state.config.ipcConflictDelay || 2000; // default 1s like catbot
+        this.lastBotLaunchTime = 0;
         this.accounts = [];
         this.botStopFlags = new Map();
         this.globalStopFlag = false;
@@ -128,6 +132,12 @@ class BotManager {
             return;
         }
 
+        // Ensure minimal delay between launches to avoid Steam IPC name clashes
+        const now = Date.now();
+        if (now - this.lastBotLaunchTime < this.ipcConflictDelay) {
+            return; // wait for delay to elapse
+        }
+
         if (state.isQuotaExceeded()) {
             logger.warn(`Bot quota (${state.config.botQuota}) exceeded, cannot start more bots`);
             this.io.emit('logMessage', `Bot quota (${state.config.botQuota}) exceeded, cannot start more bots`);
@@ -154,7 +164,9 @@ class BotManager {
         }
         
         this.botProcessQueue.splice(nextBotIndex, 1);
+
         this.startBot(nextBot);
+        this.lastBotLaunchTime = Date.now();
         
         this.io.emit('queueUpdate', {
             currentlyStarting: Array.from(state.botsStarting),
@@ -414,16 +426,34 @@ class BotManager {
     }
     
     getAccountForBot(botNumber) {
+        // Lazy-load accounts if list empty
         if (this.accounts.length === 0) {
             this.loadAccounts();
         }
-        
-        if (this.accounts.length === 0) {
-            return null;
+
+        if (this.accounts.length === 0) return null;
+
+        // Build set of accounts currently assigned to running / starting bots
+        const usedUsernames = new Set();
+        Object.values(state.botAccounts || {}).forEach(acc => {
+            if (acc && acc.username) usedUsernames.add(acc.username);
+        });
+
+        // Prefer account previously mapped to this bot (during restart)
+        if (state.botAccounts && state.botAccounts[botNumber]) {
+            const prev = state.botAccounts[botNumber];
+            if (prev && !usedUsernames.has(prev.username)) return prev;
         }
-        
-        const accountIndex = (botNumber - 1) % this.accounts.length;
-        return this.accounts[accountIndex];
+
+        // Return first free account
+        for (const acc of this.accounts) {
+            if (!usedUsernames.has(acc.username)) {
+                return acc;
+            }
+        }
+
+        // None free -> return null to indicate shortage
+        return null;
     }
     
     async injectTextmodePreload(botNumber) {
@@ -640,6 +670,9 @@ class BotManager {
             logger.info(`Removed bot ${botNumber} from queue`);
             
             this.botStopFlags.delete(botNumber);
+
+            // Release account mapping
+            delete state.botAccounts[botNumber];
             
             return true;
         }
@@ -660,6 +693,9 @@ class BotManager {
             logger.info(`Stopped bot ${botNumber} during startup`);
             
             this.botStopFlags.delete(botNumber);
+
+            // Release account mapping
+            delete state.botAccounts[botNumber];
             
             return terminationResult;
         }
@@ -678,6 +714,9 @@ class BotManager {
             logger.info(`Stopped active bot ${botNumber}`);
             
             this.botStopFlags.delete(botNumber);
+
+            // Release account mapping
+            delete state.botAccounts[botNumber];
             
             return terminationResult;
         }

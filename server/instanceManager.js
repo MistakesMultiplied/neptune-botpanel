@@ -383,6 +383,8 @@ class InstanceManager {
         args.push('-nobootstrapupdate', '-nofriendsui', '-vgui', '-noreactlogin', `-master_ipc_name_override`, `steam_bot_${botNumber}`);
         args.push('-cefNoGPU', '-cefDisableGPUCompositing');
         args.push('-installpath', path.join(state.instances.get(botNumber), 'steam'));
+        args.push('-silent');                    // Run Steam in silent mode
+        args.push('-no-browser');               // Disable Steam browser
         // Append any extra debug args
         if (extraArgs && extraArgs.length) {
             args.push(...extraArgs);
@@ -523,13 +525,13 @@ exec autoexec.cfg
             return false;
         }
 
-        // Build -applaunch command so it is executed by this specific Steam instance (steam://run would go to first steam process)
+        // Build Steam URI command for this specific Steam instance
         const tf2LaunchArgs = this.getTF2LaunchArgs(botNumber);
 
         // Ensure Steam has our desired launch options stored
         this.setTF2LaunchOptions(botNumber, tf2LaunchArgs.join(' '));
 
-        const steamArgs = ['-applaunch', '440', ...tf2LaunchArgs];
+        const steamArgs = ['steam://run/440'];
 
         const process = this.launchProgram(botNumber, steamExePath, steamArgs, {
             priority: 'normal', // keep Steam low priority, game gets its own
@@ -543,7 +545,7 @@ exec autoexec.cfg
 
         if (process) {
             if (this.io) {
-                this.io.emit('logMessage', `Uruchomiono TF2 poprzez -applaunch dla bota ${botNumber}`);
+                this.io.emit('logMessage', `Uruchomiono TF2 poprzez steam://run dla bota ${botNumber}`);
             }
 
             // TF2 will spawn shortly – we cannot get its PID here, so keep STARTING for now.
@@ -1093,10 +1095,16 @@ exec autoexec.cfg
             if (!fs.existsSync(userdataRoot)) return;
 
             const sanitized = launchOptionsString.replace(/"/g, '');
-            const newContent = `"UserLocalConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t\t"Broadcast"\n\t\t\t\t{\n\t\t\t\t\t"Permissions"\t\t"0"\n\t\t\t\t}\n\t\t\t\t"system"\n\t\t\t\t{\n\t\t\t\t\t"EnableGameOverlay"\t\t"0",\n\t\t\t\t\t"DisableCloudSync"\t\t"1"\n\t\t\t\t}\n\t\t\t\t"apps"\n\t\t\t\t{\n\t\t\t\t\t"440"\n\t\t\t\t\t{\n\t\t\t\t\t\t"LaunchOptions"\t\t\"${sanitized}\",\n\t\t\t\t\t\t"DisableOverlay"\t\t"1",\n\t\t\t\t\t\t"DisableCloudSync"\t\t"1"\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}`;
+            const newContent = `"UserLocalConfigStore"\n{\n\t"Broadcast"\n\t{\n\t\t"Permissions"\t\t"0"\n\t}\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t\t"apps"\n\t\t\t\t{\n\t\t\t\t\t"440"\n\t\t\t\t\t{\n\t\t\t\t\t\t"LaunchOptions"\t\t"${sanitized}"\n\t\t\t\t\t\t"DisableOverlay"\t\t"1"\n\t\t\t\t\t\t"DisableCloudSync"\t\t"1"\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\t"system"\n\t\t\t\t{\n\t\t\t\t\t"EnableGameOverlay"\t\t"0"\n\t\t\t\t\t"DisableCloudSync"\t\t"1"\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}`;
 
             // Ensure each userdata/<id>/config/localconfig.vdf exists and has correct content
-            const idDirs = fs.readdirSync(userdataRoot).filter(d => /^\d+$/.test(d));
+            const idDirs = fs.readdirSync(userdataRoot).filter(d => {
+                try {
+                    return fs.lstatSync(path.join(userdataRoot, d)).isDirectory();
+                } catch (_) {
+                    return false;
+                }
+            });
             idDirs.forEach(id => {
                 const cfgDir = path.join(userdataRoot, id, 'config');
                 try {
@@ -1104,32 +1112,44 @@ exec autoexec.cfg
                     const cfgPath = path.join(cfgDir, 'localconfig.vdf');
                     fs.writeFileSync(cfgPath, newContent);
                     logger.info(`Zapisano localconfig.vdf dla bota ${botNumber}: ${cfgPath}`);
+
+                    // Also ensure <id>/440/localconfig.vdf exists (some tools expect it here)
+                    try {
+                        const app440Dir = path.join(userdataRoot, id, '440');
+                        fs.mkdirSync(app440Dir, { recursive: true });
+                        const appCfgPath = path.join(app440Dir, 'localconfig.vdf');
+                        fs.writeFileSync(appCfgPath, newContent);
+                        logger.debug(`Utworzono localconfig.vdf w katalogu 440: ${appCfgPath}`);
+                    } catch (err) {
+                        logger.debug(`Nie można zapisać 440/localconfig.vdf dla ${id}: ${err.message}`);
+                    }
                 } catch (e) {
                     logger.debug(`Failed write ${id}: ${e.message}`);
                 }
             });
 
-            // Recursively walk userdata and overwrite every existing localconfig.vdf (covers deeper copies)
-            const walkAndWrite = (dir) => {
+            // Recursively walk userdata and ensure EVERY directory contains an up-to-date localconfig.vdf
+            const walkAndEnsure = (dir) => {
                 try {
+                    // Always attempt to write/overwrite localconfig.vdf in current dir
+                    const target = path.join(dir, 'localconfig.vdf');
+                    try {
+                        fs.writeFileSync(target, newContent);
+                    } catch (err) {
+                        logger.debug(`Cannot write ${target}: ${err.message}`);
+                    }
+
+                    // Recurse into subfolders
                     const entries = fs.readdirSync(dir, { withFileTypes: true });
                     for (const entry of entries) {
-                        const fullPath = path.join(dir, entry.name);
                         if (entry.isDirectory()) {
-                            walkAndWrite(fullPath);
-                        } else if (entry.isFile() && entry.name.toLowerCase() === 'localconfig.vdf') {
-                            try {
-                                fs.writeFileSync(fullPath, newContent);
-                                logger.info(`Zaktualizowano localconfig.vdf: ${fullPath}`);
-                            } catch (err) {
-                                logger.debug(`Cannot write ${fullPath}: ${err.message}`);
-                            }
+                            walkAndEnsure(path.join(dir, entry.name));
                         }
                     }
                 } catch (_) {}
             };
 
-            walkAndWrite(userdataRoot);
+            walkAndEnsure(userdataRoot);
 
             // Also ensure Steam Cloud is disabled in sharedconfig.vdf files
             this.disableSharedConfigCloud(botNumber);
@@ -1148,16 +1168,21 @@ exec autoexec.cfg
         }
 
         const interval = setInterval(() => {
-            // stop if TF2 already running for this bot
-            if (this.getBotTF2ProcessId(botNumber)) {
+            // Stop once the bot has reached the injection phase – by this point TF2 and textmode are initialised
+            const currentStatus = state.botStatuses[botNumber];
+            if (currentStatus && [BotStatus.INJECTING, BotStatus.INJECTED, BotStatus.INJECTION_ERROR].includes(currentStatus)) {
                 clearInterval(interval);
                 this.localConfigIntervals.delete(botNumber);
+                logger.debug(`Stopped localconfig updater for bot ${botNumber} (status = ${currentStatus})`);
                 return;
             }
 
             try {
+                // Continually (re)apply both launch-option files so that Steam never overwrites them
                 this.setTF2LaunchOptions(botNumber, launchOptionsString);
-                // Verify at least one file exists after write
+                this.writeSteamConfigLaunchOptions(botNumber, launchOptionsString);
+
+                // Verify at least one localconfig.vdf exists after write – once confirmed, continue looping but with no exit until injection
                 const instanceDir = state.instances.get(botNumber);
                 if (!instanceDir) return;
                 const userdataRoot = path.join(instanceDir, 'steam', 'userdata');
@@ -1174,10 +1199,11 @@ exec autoexec.cfg
                 };
                 check(userdataRoot);
                 if (matches.length>0) {
-                    logger.info(`localconfig.vdf written for bot ${botNumber}`);
-                    clearInterval(interval);
+                    logger.debug(`localconfig.vdf confirmed for bot ${botNumber} (count=${matches.length})`);
                 }
-            } catch (_) {}
+            } catch (err) {
+                logger.debug(`localconfig updater error for bot ${botNumber}: ${err.message}`);
+            }
         }, 500);
 
         this.localConfigIntervals.set(botNumber, interval);
@@ -1193,6 +1219,8 @@ exec autoexec.cfg
             '-nocrashdialog',
             '-novid',
             '-insecure',
+            '-nosound',
+            '-noshaderapi',
             '-nosteamoverlay'
         ];
     }
@@ -1207,7 +1235,8 @@ exec autoexec.cfg
             fs.mkdirSync(cfgDir, { recursive: true });
             const cfgPath = path.join(cfgDir, 'config.vdf');
 
-            const content = `"InstallConfigStore"\n{\n    "Software"\n    {\n        "Valve"\n        {\n            "Steam"\n            {\n                "Broadcast"\n                {\n                    "Permissions"\t\t"0"\n                }\n                "apps"\n                {\n                    "440"\n                    {\n                        "LaunchOptions"\t\t\"${launchOptionsString.replace(/"/g, '')}\",\n                        "DisableOverlay"\t\t"1"\n                    }\n                }\n            }\n        }\n    }\n}`;
+            const sanitized = launchOptionsString.replace(/"/g, '');
+            const content = `"InstallConfigStore"\n{\n    "Software"\n    {\n        "Valve"\n        {\n            "Steam"\n            {\n                "Broadcast"\n                {\n                    "Permissions"\t\t"0"\n                }\n                "apps"\n                {\n                    "440"\n                    {\n                        "LaunchOptions"\t\t"${sanitized}"\n                        "DisableOverlay"\t\t"1"\n                    }\n                }\n            }\n        }\n    }\n}`;
 
             fs.writeFileSync(cfgPath, content);
             logger.info(`Wrote pre-Steam LaunchOptions for bot ${botNumber}`);
@@ -1228,18 +1257,39 @@ exec autoexec.cfg
             // VDF forcing Steam Cloud disabled globally and for TF2 (app 440)
             const cloudContent = `"UserRoamingConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t\t"cloudenabled"\t\t"0"\n\t\t\t\t"apps"\n\t\t\t\t{\n\t\t\t\t\t"7"\n\t\t\t\t\t{\n\t\t\t\t\t\t"CloudEnabled"\t\t"0"\n\t\t\t\t\t}\n\t\t\t\t\t"440"\n\t\t\t\t\t{\n\t\t\t\t\t\t"cloudenabled"\t\t"0"\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}`;
 
-            const idDirs = fs.readdirSync(userdataRoot).filter(d => /^\d+$/.test(d));
+            const idDirs = fs.readdirSync(userdataRoot).filter(d => {
+                try {
+                    return fs.lstatSync(path.join(userdataRoot, d)).isDirectory();
+                } catch (_) {
+                    return false;
+                }
+            });
 
             idDirs.forEach(id => {
                 const remoteDir = path.join(userdataRoot, id, '7', 'remote');
-                try {
-                    fs.mkdirSync(remoteDir, { recursive: true });
-                    const cfgPath = path.join(remoteDir, 'sharedconfig.vdf');
-                    fs.writeFileSync(cfgPath, cloudContent);
-                    logger.info(`Wrote sharedconfig.vdf (CloudEnabled=0) for bot ${botNumber}: ${cfgPath}`);
-                } catch (err) {
-                    logger.debug(`Cannot write sharedconfig for ${id}: ${err.message}`);
-                }
+
+                // Helper to recursively create/overwrite sharedconfig.vdf in every subdirectory
+                const walkRemote = (dir) => {
+                    try {
+                        fs.mkdirSync(dir, { recursive: true });
+                        const cfgPath = path.join(dir, 'sharedconfig.vdf');
+                        try {
+                            fs.writeFileSync(cfgPath, cloudContent);
+                        } catch (err) {
+                            logger.debug(`Cannot write ${cfgPath}: ${err.message}`);
+                        }
+
+                        const entries = fs.readdirSync(dir, { withFileTypes: true });
+                        for (const entry of entries) {
+                            if (entry.isDirectory()) {
+                                walkRemote(path.join(dir, entry.name));
+                            }
+                        }
+                    } catch (_) {}
+                };
+
+                walkRemote(remoteDir);
+                logger.info(`Wrote sharedconfig.vdf (CloudEnabled=0) recursively for bot ${botNumber} in ${remoteDir}`);
             });
         } catch (err) {
             logger.warn(`disableSharedConfigCloud error: ${err.message}`);
