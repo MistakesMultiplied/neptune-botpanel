@@ -139,12 +139,15 @@ class InstanceManager {
                 }
 
                 // Create junction for common game files
-                const mainCommon = path.join(mainSteamRoot, 'steamapps', 'common');
-                const destCommon = path.join(instanceSteamDir, 'steamapps', 'common');
-                if (!fs.existsSync(destCommon)) {
-                    fs.mkdirSync(path.dirname(destCommon), { recursive: true });
-                    fs.symlinkSync(mainCommon, destCommon, 'junction');
-                    logger.info(`Linked steamapps/common for bot ${botNumber}`);
+                const mainSteamapps = path.join(mainSteamRoot, 'steamapps');
+                const destSteamapps = path.join(instanceSteamDir, 'steamapps');
+                if (!fs.existsSync(destSteamapps)) {
+                    if (fs.existsSync(mainSteamapps)) {
+                        fs.symlinkSync(mainSteamapps, destSteamapps, 'junction');
+                        logger.info(`Linked steamapps directory for bot ${botNumber}`);
+                    } else {
+                        logger.warn(`Main steamapps directory not found, cannot create junction for bot ${botNumber}`);
+                    }
                 }
 
                 // Disable Steam Client Service to avoid global tracking
@@ -495,8 +498,16 @@ exec autoexec.cfg
     
     // Launch TF2 in the instance via Steam (steam://run/440) instead of running tf_win64.exe directly
     launchTF2(botNumber, isBackground = true) {
+        // Prevent duplicate TF2 launches for this bot
+        const existingPid = this.getBotTF2ProcessId(botNumber);
+        if (existingPid) {
+            logger.warn(`TF2 already running for bot ${botNumber} (PID ${existingPid}) – skipping second launch`);
+            state.botStatuses[botNumber] = BotStatus.RUNNING;
+            this.broadcastBotStatus(botNumber);
+            return this.processes.get(botNumber)?.process || true;
+        }
         // Ensure common junction exists
-        this.ensureSteamappsSymlink(botNumber);
+        this.ensureSteamappsJunction(botNumber);
 
         // Remove leftover Source engine lock files (prevents "only one instance" errors)
         this.clearSourceLockFiles(botNumber);
@@ -1045,40 +1056,37 @@ exec autoexec.cfg
     }
 
     // Ensure steamapps/common junction exists for given bot
-    ensureSteamappsSymlink(botNumber) {
+    ensureSteamappsJunction(botNumber) {
         try {
             const instanceDir = state.instances.get(botNumber);
             if (!instanceDir) return;
             const mainSteamRoot = path.dirname(state.config.steamPath);
             const mainSteamapps = path.join(mainSteamRoot, 'steamapps');
-            const destSteamapps = path.join(instanceDir, 'steam', 'steamapps');
+            const instanceSteamDir = path.join(instanceDir, 'steam');
+            const destSteamapps = path.join(instanceSteamDir, 'steamapps');
 
+            // Ensure instance 'steam' directory exists
+            if (!fs.existsSync(instanceSteamDir)) {
+                fs.mkdirSync(instanceSteamDir, { recursive: true });
+            }
+
+            let needsLink = true;
             if (fs.existsSync(destSteamapps)) {
                 if (fs.lstatSync(destSteamapps).isSymbolicLink()) {
-                    // junction already in place
-                    return;
+                    needsLink = false;
+                } else {
+                    logger.warn(`Instance for bot ${botNumber} has a real steamapps directory, removing it to create a junction.`);
+                    fs.rmSync(destSteamapps, { recursive: true, force: true });
                 }
-                // real folder -> remove and recreate as junction
-                fs.rmSync(destSteamapps, { recursive: true, force: true });
             }
-            // ensure parent dir exists
-            fs.mkdirSync(path.dirname(destSteamapps), { recursive: true });
-            fs.symlinkSync(mainSteamapps, destSteamapps, 'junction');
-            logger.info(`Recreated steamapps junction for bot ${botNumber}`);
 
-            // Removed manual copying of steamclient DLLs – rely on Steam's own files.
-            // Still ensure that steam_appid.txt exists so the game starts without issues.
-            try {
-                const tf2Dir = path.join(destSteamapps, 'common', 'Team Fortress 2');
-                if (!fs.existsSync(tf2Dir)) return; // TF2 not installed/copied yet.
-
-                const appIdFile = path.join(tf2Dir, 'steam_appid.txt');
-                if (!fs.existsSync(appIdFile)) {
-                    fs.writeFileSync(appIdFile, '440');
-                    logger.info(`Created steam_appid.txt for bot ${botNumber}`);
+            if (needsLink) {
+                if (fs.existsSync(mainSteamapps)) {
+                    fs.symlinkSync(mainSteamapps, destSteamapps, 'junction');
+                    logger.info(`Created/repaired steamapps junction for bot ${botNumber}`);
+                } else {
+                    logger.warn(`Main steamapps directory not found at ${mainSteamapps}. Skipping junction creation.`);
                 }
-            } catch (extraErr) {
-                logger.warn(`Failed to create steam_appid.txt: ${extraErr.message}`);
             }
         } catch (err) {
             logger.warn(`Failed to ensure steamapps junction for bot ${botNumber}: ${err.message}`);
@@ -1214,14 +1222,31 @@ exec autoexec.cfg
         return [
             '-steam',
             '-steamipcname', `steam_bot_${botNumber}`,
-            '-textmode',
-            '-nosound',
-            '-nocrashdialog',
+            '-sw',
+            '-w 1',
+            '-h 480',
+            '-x 30000',
+            '-y 30000',
             '-novid',
-            '-insecure',
-            '-nosound',
+            '-nojoy',
+            '-noipx',
             '-noshaderapi',
-            '-nosteamoverlay'
+            '-nomouse',
+            '-nomessagebox',
+            '-nominidumps',
+            '-nohltv',
+            '-low',
+            '-threads 1',
+            '-nobreakpad',
+            '-reuse',
+            '-noquicktime',
+            '-precachefontchars',
+            '-particles 1',
+            '-textmode',
+            '-snoforceformat',
+            '-softparticlesdefaultoff',
+            '-wavonly',
+            '-forcenovsync'
         ];
     }
 

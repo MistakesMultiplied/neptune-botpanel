@@ -13,7 +13,7 @@ class BotManager {
         this.maxConcurrentStarts = state.config.maxConcurrentStarts || 2;
 
         // Anti-IPC conflict delay (ms) between successive bot launches
-        this.ipcConflictDelay = state.config.ipcConflictDelay || 2000; // default 1s like catbot
+        this.ipcConflictDelay = state.config.ipcConflictDelay || 5000; // default 1s like catbot
         this.lastBotLaunchTime = 0;
         this.accounts = [];
         this.botStopFlags = new Map();
@@ -379,6 +379,13 @@ class BotManager {
             }
             
             await this.injectCheat(botNumber);
+
+            // Wait for pipe connection from cheat
+            this.io.emit('logMessage', `Waiting for pipe connection (max 20s)...`);
+            const connected = await this.waitForPipeConnection(botNumber, 20000);
+            if (!connected) {
+                throw new Error('Pipe connection timeout');
+            }
             
             state.botsStarting.delete(botNumber);
             state.activeBots.add(botNumber);
@@ -400,6 +407,18 @@ class BotManager {
             this.io.emit('logMessage', `Error starting bot ${botNumber}: ${err.message}`);
             
             state.botsStarting.delete(botNumber);
+
+            // Ensure processes are stopped on pipe timeout
+            if (err.message.includes('Pipe connection timeout')) {
+                try {
+                    await instanceManager.stopBot(botNumber);
+                } catch (_) {}
+
+                // Restart bot after small delay to retry
+                setTimeout(() => {
+                    this.queueBot(botNumber);
+                }, 3000);
+            }
             
             if (err.message.includes('aborted due to stop flag')) {
                 state.botStatuses[botNumber] = BotStatus.STOPPED;
@@ -945,6 +964,25 @@ class BotManager {
         }
 
         return null;
+    }
+
+    // Wait until cheat establishes pipe connection or timeout
+    waitForPipeConnection(botNumber, timeoutMs = 20000) {
+        return new Promise(resolve => {
+            const start = Date.now();
+            const check = () => {
+                if (state.pipeConnections.has(botNumber) && state.pipeStatuses[botNumber] === 'Connected') {
+                    resolve(true);
+                    return;
+                }
+                if (Date.now() - start >= timeoutMs) {
+                    resolve(false);
+                    return;
+                }
+                setTimeout(check, 500);
+            };
+            check();
+        });
     }
 }
 
