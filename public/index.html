@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>neptune</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="experimental-layout.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="panel">
+        <div class="sidebar">
+            <div class="logo">
+                <h1>neptune</h1>
+            </div>
+            <nav>
+                <ul>
+                    <li class="active" data-page="dashboard"><i class="icon fa-solid fa-gauge-high"></i> Dashboard</li>
+                    <li data-page="settings"><i class="icon fa-solid fa-gear"></i> Settings</li>
+                    <li data-page="logs"><i class="icon fa-solid fa-file-lines"></i> Logs</li>
+                    <li data-page="guides"><i class="icon fa-solid fa-book"></i> Guides</li>
+                </ul>
+                <ul class="external-links">
+                    <li>
+                        <a href="https://discord.gg/acCHKJqp2m" target="_blank" class="discord-link">
+                            <i class="icon fa-brands fa-discord"></i> Discord
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+            <div class="user-info">
+                <div class="status-info">
+                    <div class="status">
+                        <span class="status-label">Active Bots:</span>
+                        <span class="status-value" id="active-bots">0</span>
+                    </div>
+                    <div class="status">
+                        <span class="status-label">Bot Quota:</span>
+                        <span class="status-value" id="bot-quota">10</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <div class="page" id="dashboard-page">
+                <div class="header">
+                    <h2>Bot Management</h2>
+                    <div class="controls">
+                        <button id="start-all-bots" class="btn-primary">Start All</button>
+                        <button id="stop-all-bots" class="btn-danger">Stop All</button>
+                    </div>
+                </div>
+                
+                <div class="page-content">
+                    <div class="global-commands">
+                        <h3>Global Commands</h3>
+                        <div class="command-input">
+                            <input type="text" id="global-command-input" placeholder="Enter command for all bots...">
+                            <button id="send-all-command" class="btn-primary">Send to All Bots</button>
+                        </div>
+                    </div>
+                    
+                    <div class="auto-restart-section">
+                        <div class="auto-restart-header">
+                            <h3>Auto-Restart</h3>
+                            <div class="switch-container">
+                                <label class="switch">
+                                    <input type="checkbox" id="auto-restart-toggle">
+                                    <span class="slider round"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="auto-restart-description">
+                            <p>When enabled, bots will automatically restart if TF2 crashes or Steam segfaults</p>
+                        </div>
+                        <div class="restarting-bots">
+                            <h4>Restarting Bots</h4>
+                            <div id="restarting-bots-list" class="restarting-bots-list">
+                                <span class="empty-list">No bots are currently restarting</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="bot-grid">
+                        <!-- Bots will be added here dynamically -->
+                    </div>
+                    
+                    <div class="separator">
+                        <h3>Queue</h3>
+                    </div>
+                    
+                    <div class="queue-status">
+                        <div class="queue-info">
+                            <span>Starting: <span id="currently-starting">0</span></span>
+                            <span>In Queue: <span id="queue-count">0</span></span>
+                        </div>
+                        <div id="queue-list" class="queue-list">
+                            <!-- Queue will be shown here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="page hidden" id="settings-page">
+                <div class="header">
+                    <h2>Settings</h2>
+                    <div class="controls">
+                        <button id="save-settings" class="btn-primary">Save Settings</button>
+                    </div>
+                </div>
+                
+                <div class="page-content">
+                    <div class="settings-form">
+                        <div class="form-group">
+                            <label for="max-concurrent-starts">Max Concurrent Starts:</label>
+                            <input type="number" id="max-concurrent-starts" min="1" max="10" value="2">
+                            <span class="setting-help">(recommended 2-3 boats)</span>  
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="bot-quota-setting">Bot Quota:</label>
+                            <input type="number" id="bot-quota-setting" min="1" max="20" value="10">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="tf2-start-delay">TF2 Start Delay (s):</label>
+                            <input type="number" id="tf2-start-delay" min="17" max="35" step="1" value="20">
+                            <span class="setting-help">(recommended 25 secs, let da steam initialize)</span>
+                        </div> 
+                        
+                        <div class="form-group">
+                            <label for="inject-delay">Inject Delay (s):</label>
+                            <input type="number" id="inject-delay" min="1" step="1" value="5">
+                            <span class="setting-help">(recommended 45-60 secs)</span>
+                        </div>
+                        
+                        <div class="form-group switch-container">
+                            <label for="enable-textmode-delay">Textmode Inject Delay:</label>
+                            <label class="switch">
+                                <input type="checkbox" id="enable-textmode-delay">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="textmode-delay">Textmode Delay (s):</label>
+                            <input type="range" id="textmode-delay" min="0.5" max="5" step="0.1" value="1.5">
+                            <output for="textmode-delay" id="textmode-delay-value">1.5</output>
+                            <span class="setting-help">(recommended 0.5-0.9)</span>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="sandboxie-path">Sandboxie Path:</label>
+                            <input type="text" id="sandboxie-path" value="C:\Program Files\Sandboxie-Plus\Start.exe">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="steam-path">Steam Path:</label>
+                            <input type="text" id="steam-path" value="C:\Program Files (x86)\Steam\steam.exe">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="tf2-path">TF2 Path:</label>
+                            <input type="text" id="tf2-path" value="C:\Program Files (x86)\Steam\steamapps\common\Team Fortress 2\tf_win64.exe">
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="pipe-name">Pipe Name:</label>
+                            <input type="text" id="pipe-name" value="\\\\.\\pipe\\AwootismBotPipe">
+                        </div>
+                        
+                        <div class="form-group switch-container">
+                            <label for="experimental-layout">Experimental Layout:</label>
+                            <label class="switch">
+                                <input type="checkbox" id="experimental-layout">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        
+                        <div class="form-group switch-container">
+                            <label for="auto-restart-enabled">Auto-Restart:</label>
+                            <label class="switch">
+                                <input type="checkbox" id="auto-restart-enabled">
+                                <span class="slider"></span>
+                            </label>
+                            <div class="setting-help">When enabled, bots will automatically restart if TF2 crashes or Steam segfaults</div>
+                        </div>
+                    </div>
+
+                    <h3 class="settings-section-title">Customize Colors</h3>
+                    <div class="color-settings">
+                        <div class="color-preset-options">
+                            <button id="theme-default" class="color-preset active">Default</button>
+                            <button id="theme-dark-blue" class="color-preset">Dark Blue</button>
+                            <button id="theme-dark-red" class="color-preset">Dark Red</button>
+                            <button id="theme-dark-green" class="color-preset">Dark Green</button>
+                            <button id="theme-high-contrast" class="color-preset">High Contrast</button>
+                            <button id="theme-custom" class="color-preset">Custom</button>
+                        </div>
+                        
+                        <div class="color-grid">
+                            <div class="color-item">
+                                <label for="primary-color">Primary Color</label>
+                                <div class="color-input-container">
+                                    <input type="color" id="primary-color" value="#3a86ff">
+                                    <span class="color-value">#3a86ff</span>
+                                </div>
+                            </div>
+                            
+                            <div class="color-item">
+                                <label for="secondary-color">Secondary Color</label>
+                                <div class="color-input-container">
+                                    <input type="color" id="secondary-color" value="#1d2636">
+                                    <span class="color-value">#1d2636</span>
+                                </div>
+                            </div>
+                            
+                            <div class="color-item">
+                                <label for="danger-color">Danger Color</label>
+                                <div class="color-input-container">
+                                    <input type="color" id="danger-color" value="#ef476f">
+                                    <span class="color-value">#ef476f</span>
+                                </div>
+                            </div>
+                            
+                            <div class="color-item">
+                                <label for="warning-color">Warning Color</label>
+                                <div class="color-input-container">
+                                    <input type="color" id="warning-color" value="#ffd166">
+                                    <span class="color-value">#ffd166</span>
+                                </div>
+                            </div>
+                            
+                            <div class="color-item">
+                                <label for="success-color">Success Color</label>
+                                <div class="color-input-container">
+                                    <input type="color" id="success-color" value="#06d6a0">
+                                    <span class="color-value">#06d6a0</span>
+                                </div>
+                            </div>
+                            
+                            <div class="color-item">
+                                <label for="dark-bg">Background Color</label>
+                                <div class="color-input-container">
+                                    <input type="color" id="dark-bg" value="#121826">
+                                    <span class="color-value">#121826</span>
+                                </div>
+                            </div>
+                            
+                            <div class="color-item">
+                                <label for="card-bg">Card Background</label>
+                                <div class="color-input-container">
+                                    <input type="color" id="card-bg" value="#1e2a3d">
+                                    <span class="color-value">#1e2a3d</span>
+                                </div>
+                            </div>
+                            
+                            <div class="color-item">
+                                <label for="text-color">Text Color</label>
+                                <div class="color-input-container">
+                                    <input type="color" id="text-color" value="#ffffff">
+                                    <span class="color-value">#ffffff</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="color-actions">
+                            <button id="save-colors" class="btn-primary">Save Colors</button>
+                            <button id="reset-colors" class="btn-outline">Reset to Default</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="page hidden" id="logs-page">
+                <div class="header">
+                    <h2>Logs</h2>
+                    <div class="controls">
+                        <button id="clear-logs" class="btn-secondary">Clear Logs</button>
+                    </div>
+                </div>
+                
+                <div class="logs-container">
+                    <div id="logs" class="logs">
+                        <!-- Logs will appear here -->
+                    </div>
+                </div>
+            </div>
+            
+            <div class="page hidden" id="guides-page">
+                <div class="header">
+                    <h2>Guides</h2>
+                </div>
+                
+                <div class="page-content">
+                    <div class="guides-container">
+                        <div class="guide-section">
+                            <h3>Prerequisites</h3>
+                            <ul>
+                                <li>Windows 10 or 11</li>
+                                <li><a href="https://nodejs.org/" target="_blank">Node.js</a> (v14 or newer)</li>
+                                <li><a href="https://sandboxie-plus.com/" target="_blank">Sandboxie Plus</a> (latest version)</li>
+                                <li>Steam</li>
+                                <li>Team Fortress 2</li>
+                            </ul>
+                        </div>
+
+                        <div class="guide-section">
+                            <h3>Required Files</h3>
+                            <p>Place the following files in the <code>/files</code> directory:</p>
+                            <ol>
+                                <li><strong>attach.exe</strong> - The injector executable</li>
+                                <li><strong>Amalgamx64ReleaseTextmode.dll</strong> - The neptune DLL</li>
+                                <li><strong>VAC-Bypass-Loader.exe</strong> - The VAC bypass loader</li>
+                                <li><strong>VAC-Bypass.dll</strong> - The VAC bypass DLL</li>
+                                <li><strong>textmode-preload.dll</strong> - The textmode preload DLL</li>
+                                <li><strong>accounts.txt</strong> - Steam account credentials</li>
+                            </ol>
+                            
+                            <h4>accounts.txt Format</h4>
+                            <pre><code>username1:password1
+username2:password2</code></pre>
+                            <p>Lines starting with <code>#</code> are considered comments and will be ignored.</p>
+                        </div>
+
+                        <div class="guide-section">
+                            <h3>Sandboxie Setup</h3>
+                            <p>The panel requires Sandboxie Plus to be installed and properly configured:</p>
+                            <ol>
+                                <li>Install <a href="https://sandboxie-plus.com/" target="_blank">Sandboxie Plus</a> (latest version)</li>
+                                <li>Ensure the default installation path is used: <code>C:\Program Files\Sandboxie-Plus\</code></li>
+                                <li>The panel will automatically create sandboxes named <code>bot1</code>, <code>bot2</code>, etc.</li>
+                            </ol>
+                            <p>If your Sandboxie is installed in a different location, modify the <code>sandboxiePath</code> in <code>config.json</code>.</p>
+                            
+                            <h4>Sandbox Configuration</h4>
+                            <p>The panel automatically configures each sandbox with the following settings:</p>
+                            <ul>
+                                <li>Network access enabled</li>
+                                <li>Drop admin rights enabled</li>
+                                <li>OpenGL/DirectX hardware acceleration enabled</li>
+                                <li>Shared access to Steam folders:
+                                    <ul>
+                                        <li>Program files</li>
+                                        <li>Steam libraries</li>
+                                        <li>User data</li>
+                                        <li>Workshop data</li>
+                                    </ul>
+                                </li>
+                            </ul>
+                        </div>
+
+                        <div class="guide-section">
+                            <h3>Configuration</h3>
+                            <p>You can modify the panel settings by editing <code>config.json</code>:</p>
+                            <pre><code>{
+  "maxConcurrentStarts": 2,     // Maximum bots to start simultaneously
+  "botQuota": 20,               // Maximum number of bots
+  "tf2StartDelay": 10000,       // Delay before starting TF2 (ms)
+  "injectDelay": 50,            // Delay before injecting (ms)
+  "sandboxiePath": "C:\\Program Files\\Sandboxie-Plus\\Start.exe",
+  "steamPath": "C:\\Program Files (x86)\\Steam\\steam.exe",
+  "tf2Path": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Team Fortress 2\\tf_win64.exe",
+  "pipeName": "\\\\.\\pipe\\AwootismBotPipe"
+}</code></pre>
+                        </div>
+
+                        <div class="guide-section">
+                            <h3>Troubleshooting</h3>
+                            
+                            <h4>Missing Files</h4>
+                            <p>If the panel reports missing files, ensure all required files are placed in the <code>/files</code> directory.</p>
+                            
+                            <h4>Sandboxie Issues</h4>
+                            <ul>
+                                <li>Verify Sandboxie Plus is properly installed</li>
+                                <li>Check Sandboxie logs for any errors</li>
+                                <li>Ensure your user has sufficient permissions to create and manage sandboxes</li>
+                            </ul>
+                            
+                            <h4>TF2 or Steam Issues</h4>
+                            <ul>
+                                <li>Verify Steam and TF2 paths in <code>config.json</code></li>
+                                <li>Check that Steam is running properly outside of any sandbox</li>
+                                <li>Verify TF2 launches correctly outside of the panel</li>
+                            </ul>
+                        </div>
+
+                        <div class="guide-section">
+                            <h3>Disclaimer</h3>
+                            <p>This software is provided for educational purposes only. Using cheats or bots in multiplayer games may violate the game's terms of service and could result in account termination. Use at your own risk.</p>
+                        </div>
+
+                        <div class="guide-section">
+                            <h3>Windows Optimization for Bots</h3>
+                            
+                            <h4>Disabling User Account Control (UAC)</h4>
+                            <p>UAC can interfere with the proper functioning of sandboxed applications. Disabling it can improve stability:</p>
+                            <ol>
+                                <li>Press <code>Win + R</code>, type <code>UserAccountControlSettings</code> and press Enter</li>
+                                <li>Drag the slider to the bottom ("Never notify")</li>
+                                <li>Click OK and restart your PC</li>
+                            </ol>
+                            <p><strong>Warning:</strong> Disabling UAC reduces system security. Only do this on dedicated bot machines.</p>
+                            
+                            <h4>Performance Optimization</h4>
+                            <p>These tweaks can help improve performance when running multiple bot instances:</p>
+                            <ol>
+                                <li><strong>Disable Visual Effects:</strong>
+                                    <ul>
+                                        <li>Press <code>Win + R</code>, type <code>SystemPropertiesAdvanced</code> and press Enter</li>
+                                        <li>In the Performance section, click "Settings"</li>
+                                        <li>Select "Adjust for best performance" or manually disable unnecessary effects</li>
+                                        <li>Click Apply and OK</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Optimize Power Settings:</strong>
+                                    <ul>
+                                        <li>Open Control Panel > Power Options</li>
+                                        <li>Select "High Performance" plan</li>
+                                        <li>Click "Change plan settings" > "Change advanced power settings"</li>
+                                        <li>Set "Turn off hard disk after" to 0 (never)</li>
+                                        <li>Set "Sleep after" to 0 (never)</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Disable Windows Update:</strong>
+                                    <ul>
+                                        <li>Press <code>Win + R</code>, type <code>services.msc</code> and press Enter</li>
+                                        <li>Find "Windows Update" service</li>
+                                        <li>Right-click > Properties</li>
+                                        <li>Change "Startup type" to "Disabled"</li>
+                                        <li>Click Stop, then Apply and OK</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Disable Unnecessary Services:</strong>
+                                    <ul>
+                                        <li>In services.msc, consider disabling these services:</li>
+                                        <li>Windows Search</li>
+                                        <li>Superfetch (SysMain)</li>
+                                        <li>Print Spooler</li>
+                                        <li>Windows Defender (not recommended unless you have alternative protection)</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Increase Virtual Memory:</strong>
+                                    <ul>
+                                        <li>Press <code>Win + R</code>, type <code>SystemPropertiesAdvanced</code> and press Enter</li>
+                                        <li>Under Performance, click "Settings"</li>
+                                        <li>Go to "Advanced" tab > Virtual Memory > "Change"</li>
+                                        <li>Uncheck "Automatically manage paging file size"</li>
+                                        <li>Select "Custom size" and set both Initial and Maximum sizes to 1.5x your RAM (in MB)</li>
+                                        <li>Click Set, then OK</li>
+                                    </ul>
+                                </li>
+                                <li><strong>Disable Windows Defender Real-time Protection:</strong>
+                                    <ul>
+                                        <li>Open Windows Security</li>
+                                        <li>Click on "Virus & threat protection"</li>
+                                        <li>Under "Virus & threat protection settings", click "Manage settings"</li>
+                                        <li>Turn off "Real-time protection"</li>
+                                        <li>Also disable "Cloud-delivered protection" and "Automatic sample submission"</li>
+                                    </ul>
+                                </li>
+                            </ol>
+                            
+                            <p><strong>Important Note:</strong> Many of these optimizations reduce security or disable important Windows features. Only implement them on dedicated bot machines, not on your main PC.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="bot-commands" id="bot-commands">
+            <div class="command-header">
+                <h3>Bot <span id="selected-bot-number">0</span> Commands</h3>
+                <button class="close-commands">&times;</button>
+            </div>
+            <div class="command-input">
+                <input type="text" id="command-input" placeholder="Enter command...">
+                <button id="send-command" class="btn-primary">Send</button>
+            </div>
+            <div class="command-presets">
+                <button class="preset-command" data-command="map itemtest">Connect Local</button>
+                <button class="preset-command" data-command="disconnect">Disconnect</button>
+                <button class="preset-command" data-command="retry">Retry</button>
+                <button class="preset-command" data-command="join_class sniper">Sniper</button>
+                <button class="preset-command" data-command="join_class heavyweapons">Heavy</button>
+                <button class="preset-command" data-command="join_class scout">Scout</button>
+                <button class="preset-command" data-command="join_class pyro">Pyro</button>
+                <button class="preset-command" data-command="join_class engineer">Engineer</button>
+                <button class="preset-command" data-command="join_class medic">Medic</button>
+                <button class="preset-command" data-command="join_class spy">Spy</button>
+                <button class="preset-command" data-command="kill">Kill</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Layout Toggle Modal -->
+    <div class="modal-overlay" id="layout-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Try Experimental Layout?</h3>
+            </div>
+            <div class="modal-body">
+                <p>Would you like to try the new experimental layout? It features a more modern UI with improved visuals.</p>
+                <p>You can always switch back to the classic layout from Settings.</p>
+            </div>
+            <div class="modal-footer">
+                <button id="modal-reject" class="btn-outline">Classic Layout</button>
+                <button id="modal-accept" class="btn-primary">Try New Layout</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Contribute Modal -->
+    <div class="modal-overlay" id="contribute-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Contribute to Neptune</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>Neptune is an open-source project and we welcome contributions from the community!</p>
+                <div class="contribute-links">
+                    <a href="https://github.com/MistakesMultiplied/neptune" target="_blank" class="contribute-link">
+                        <i class="fa-brands fa-github"></i>
+                        <span>GitHub Repository</span>
+                    </a>
+                    <a href="https://discord.gg/acCHKJqp2m" target="_blank" class="contribute-link">
+                        <i class="fa-brands fa-discord"></i>
+                        <span>Join our Discord</span>
+                    </a>
+                </div>
+                <div class="contribute-info">
+                    <p>Ways you can contribute:</p>
+                    <ul>
+                        <li>Report bugs and issues</li>
+                        <li>Suggest new features</li>
+                        <li>Submit pull requests</li>
+                        <li>Improve documentation</li>
+                        <li>Help other users in Discord</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="contribute-close" class="btn-primary">Close</button>
+            </div>
+        </div>
+    </div>
+    
+    <template id="bot-card-template">
+        <div class="bot-card" data-bot-number="0">
+            <div class="bot-header">
+                <h3>Bot <span class="bot-number">0</span></h3>
+                <div class="bot-status">Not Started</div>
+            </div>
+            <div class="bot-info">
+                <div class="info-row">
+                    <span class="info-label">Pipe Status:</span>
+                    <span class="pipe-status">Disconnected</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Health:</span>
+                    <span class="bot-health">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Class:</span>
+                    <span class="bot-class">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Map:</span>
+                    <span class="bot-map">-</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Last Update:</span>
+                    <span class="last-update">-</span>
+                </div>
+            </div>
+            <div class="bot-actions">
+                <button class="btn-start">Start</button>
+                <button class="btn-stop">Stop</button>
+                <button class="btn-restart">Restart</button>
+                <button class="btn-command">Commands</button>
+            </div>
+        </div>
+    </template>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="app.js"></script>
+    <button id="debugSteamBot1">Steam Debug Bot1</button>
+    <script>
+      document.getElementById('debugSteamBot1').addEventListener('click', () => {
+        launchSteamDebug(1);
+      });
+    </script>
+</body>
+</html> 

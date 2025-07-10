@@ -1,0 +1,23 @@
+{
+  "discord_token": "lmaobox",
+  "channel_id": 1391174075610693702,
+  "settings": {
+    "check_interval_seconds": 2,
+    "max_message_cache": 1000,
+    "enable_debug_logging": false
+  },
+  "formatting": {
+    "team_colors": {
+      "RED": "0xff4444",
+      "BLU": "0x4444ff", 
+      "SPEC": "0x888888",
+      "UNK": "0xcccccc"
+    },
+    "team_emojis": {
+      "RED": "🔴",
+      "BLU": "🔵",
+      "SPEC": "👁️", 
+      "UNK": "❓"
+    }
+  }
+} 

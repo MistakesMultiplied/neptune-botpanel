@@ -1,0 +1,12 @@
+{
+  "maxConcurrentStarts": 3,
+  "botQuota": 60,
+  "tf2StartDelay": 28,
+  "injectDelay": 55,
+  "steamPath": "C:\\Program Files (x86)\\Steam\\steam.exe",
+  "tf2Path": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Team Fortress 2\\tf_win64.exe",
+  "pipeName": "\\\\.\\pipe\\AwootismBotPipe",
+  "enableTextmodeDelay": false,
+  "textmodeDelay": 0.5,
+  "autoRestartEnabled": false
+}
