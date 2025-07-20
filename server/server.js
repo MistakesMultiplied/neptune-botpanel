@@ -6,7 +6,7 @@ const fs = require('fs');
 const logger = require('./logger');
 const PipeServer = require('./pipeServer');
 const BotManager = require('./botManager');
-const instanceManager = require('./instanceManager');
+const sandboxManager = require('./sandboxManager');
 const { state, BotStatus } = require('../shared/state');
 const { exec } = require('child_process');
 
@@ -135,26 +135,12 @@ class neptunePanelServer {
             }
         });
         
-        this.app.post('/api/bot/:botNumber/steamdebug', (req, res) => {
-            const botNumber = parseInt(req.params.botNumber);
-            if (isNaN(botNumber) || botNumber < 0 || botNumber > 99) {
-                return res.status(400).json({ error: 'Invalid bot number' });
-            }
-            this.botManager.debugSteam(botNumber)
-                .then(() => {
-                    res.json({ success: true, message: `Launching Steam debug for bot ${botNumber}` });
-                })
-                .catch(err => {
-                    res.status(500).json({ success: false, message: err.message });
-                });
-        });
-        
         this.app.post('/api/auto-restart/toggle', (req, res) => {
             const { enabled } = req.body;
             if (typeof enabled !== 'boolean') {
                 return res.status(400).json({ error: 'Enabled parameter must be a boolean' });
             }
-            instanceManager.toggleAutoRestart(enabled);
+            sandboxManager.toggleAutoRestart(enabled);
             res.json({ 
                 success: true, 
                 message: `Auto-restart ${enabled ? 'enabled' : 'disabled'}`,
@@ -193,7 +179,9 @@ class neptunePanelServer {
             if (typeof newSettings.textmodeDelay !== 'undefined') {
                 state.config.textmodeDelay = parseFloat(newSettings.textmodeDelay);
             }
-
+            if (typeof newSettings.sandboxiePath !== 'undefined') {
+                state.config.sandboxiePath = newSettings.sandboxiePath;
+            }
             if (typeof newSettings.steamPath !== 'undefined') {
                 state.config.steamPath = newSettings.steamPath;
             }
@@ -313,11 +301,27 @@ class neptunePanelServer {
                 try {
                     this.io.emit('logMessage', 'Stopping all bots and terminating processes...');
                     await this.botManager.stopAllBots();
-                    this.io.emit('logMessage', 'Performing instance cleanup...');
+                    this.io.emit('logMessage', 'Performing sandbox cleanup...');
                     try {
-                        await instanceManager.cleanup();
+                        const botNumbers = Array.from(state.sandboxes.keys());
+                        for (const botNumber of botNumbers) {
+                            const sandboxName = state.sandboxes.get(botNumber);
+                            if (sandboxName) {
+                                const finishCleanup = async () => {
+                                    try {
+                                        await new Promise(resolve => setTimeout(resolve, 1000));
+                                        const sandboxiePath = state.config.sandboxiePath;
+                                        const killCmd = `"${sandboxiePath}" /box:${sandboxName} cmd /c "taskkill /F /T /IM *.*"`;
+                                        exec(killCmd);
+                                    } catch (err) {
+                                        logger.error(`Final cleanup error for ${sandboxName}: ${err.message}`);
+                                    }
+                                };
+                                finishCleanup();
+                            }
+                        }
                     } catch (cleanupErr) {
-                        logger.error(`Error during instance cleanup: ${cleanupErr.message}`);
+                        logger.error(`Error during sandbox cleanup: ${cleanupErr.message}`);
                     }
                     this.io.emit('logMessage', 'All bots stopped successfully');
                 } catch (err) {
@@ -327,7 +331,7 @@ class neptunePanelServer {
             });
             socket.on('toggleAutoRestart', (enabled) => {
                 if (typeof enabled === 'boolean') {
-                    instanceManager.toggleAutoRestart(enabled);
+                    sandboxManager.toggleAutoRestart(enabled);
                     this.io.emit('autoRestartState', {
                         enabled: state.autoRestartEnabled,
                         restartingBots: Array.from(state.restartingBots)
@@ -410,7 +414,7 @@ class neptunePanelServer {
                 this.botManager.setPipeServer(this.pipeServer);
             }
             this.botManager.initialize();
-            instanceManager.setIO(this.io);
+            sandboxManager.setIO(this.io);
             logger.info('Bot manager initialized');
         } catch (error) {
             logger.error(`Failed to initialize BotManager: ${error.message}`);

@@ -17,6 +17,7 @@ function loadConfig() {
             enableTextmodeDelay: false,
             textmodeDelay: 1.5,
             autoRestartEnabled: false,
+            sandboxiePath: 'C:\\Program Files\\Sandboxie-Plus\\Start.exe',
             steamPath: 'C:\\Program Files (x86)\\Steam\\steam.exe',
             tf2Path: 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Team Fortress 2\\tf_win64.exe',
             pipeName: '\\\\.\\pipe\\AwootismBotPipe',
@@ -34,8 +35,8 @@ const BotStatus = {
     
     // Initialization statuses
     INITIALIZING: "Initializing",
-    INSTANCE_SETUP: "Setting up Instance",
-    INSTANCE_ERROR: "Instance Error",
+    SANDBOX_SETUP: "Setting up Sandbox",
+    SANDBOX_ERROR: "Sandbox Error",
     
     // VAC Bypass statuses
     VAC_BYPASS_LOADING: "Loading VAC Bypass",
@@ -81,9 +82,8 @@ class PanelState {
         this.disconnectTimers = new Map();
         this.lastHeartbeats = {};
         
-        // Instance state (replaces Sandboxie)
-        this.instances = new Map();
-        this.botAccounts = {};
+        // Sandboxie state
+        this.sandboxes = new Map();
         
         // Auto-restart settings
         this.autoRestartEnabled = this.config.autoRestartEnabled || false;

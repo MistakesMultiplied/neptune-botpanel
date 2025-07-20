@@ -959,24 +959,7 @@ function showContributeModal() {
     }
 }
 
-function launchSteamDebug(botNumber) {
-  fetch(`/api/bot/${botNumber}/steamdebug`, { method: 'POST' })
-    .then(r => r.json())
-    .then(res => {
-      addLogMessage(res.message || 'Debug launched');
-    })
-    .catch(err => addLogMessage('Error: ' + err.message));
-}
-
 document.addEventListener('DOMContentLoaded', () => {
-    const controls = document.querySelector('.controls');
-    if (controls) {
-      const dbgBtn = document.createElement('button');
-      dbgBtn.className = 'btn-secondary btn-debug';
-      dbgBtn.textContent = 'Steam Debug Bot1';
-      dbgBtn.addEventListener('click', () => launchSteamDebug(1));
-      controls.appendChild(dbgBtn);
-    }
     init();
     
     console.log('Showing contribute modal for testing');

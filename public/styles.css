@@ -1363,10 +1363,3 @@ output {
 .modal-header {
     position: relative;
 } 
-
-.btn-debug {
-    background-color: var(--warning-color);
-}
-.btn-debug:hover {
-    background-color: #e0b400;
-} 
