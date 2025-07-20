@@ -19,6 +19,7 @@
                 <ul>
                     <li class="active" data-page="dashboard"><i class="icon fa-solid fa-gauge-high"></i> Dashboard</li>
                     <li data-page="settings"><i class="icon fa-solid fa-gear"></i> Settings</li>
+                    <li data-page="vars-editor"><i class="icon fa-solid fa-code"></i> Vars Editor</li>
                     <li data-page="logs"><i class="icon fa-solid fa-file-lines"></i> Logs</li>
                     <li data-page="guides"><i class="icon fa-solid fa-book"></i> Guides</li>
                 </ul>
@@ -466,6 +467,26 @@ username2:password2</code></pre>
                             </ol>
                             
                             <p><strong>Important Note:</strong> Many of these optimizations reduce security or disable important Windows features. Only implement them on dedicated bot machines, not on your main PC.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- Vars Editor Page -->
+            <div class="page hidden" id="vars-editor-page">
+                <div class="header">
+                    <h2>Vars Editor</h2>
+                    <div class="controls">
+                        <input type="text" id="vars-search-box" class="search-box" placeholder="Search..." style="display:none;">
+                        <button id="vars-save" class="btn-primary">Save</button>
+                        <button id="vars-reload" class="btn-secondary">Reload</button>
+                    </div>
+                </div>
+                <div class="page-content">
+                    <div class="editor-wrapper">
+                        <div class="line-numbers" id="vars-line-numbers"></div>
+                        <div class="code-area">
+                            <pre id="vars-highlight"></pre>
+                            <textarea id="vars-editor" spellcheck="false"></textarea>
                         </div>
                     </div>
                 </div>

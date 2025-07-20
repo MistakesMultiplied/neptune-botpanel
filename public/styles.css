@@ -1363,3 +1363,104 @@ output {
 .modal-header {
     position: relative;
 } 
+
+/* Vars Editor */
+.editor-wrapper {
+    display: flex;
+    background-color: var(--secondary-color);
+    border-radius: var(--radius);
+    height: 70vh;
+    overflow: hidden;
+    font-family: monospace;
+    margin-top: 20px;
+}
+
+.line-numbers {
+    min-width: 40px;
+    padding: 10px 5px 10px 10px;
+    background: var(--sidebar-bg);
+    color: var(--text-muted);
+    text-align: right;
+    user-select: none;
+    border-right: 1px solid var(--border-color);
+    overflow: hidden; /* prevent independent scrolling */
+}
+.line-numbers::-webkit-scrollbar { /* Chrome/Edge */
+    display: none;
+}
+
+.code-area {
+    position: relative;
+    flex: 1;
+}
+
+#vars-editor {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: 100%;
+    border: none;
+    resize: none;
+    background: transparent;
+    color: transparent;
+    caret-color: var(--text-color);
+    font-family: monospace;
+    font-size: 14px;
+    line-height: 1.4em;
+    padding: 10px;
+    overflow: auto;
+    outline: none; /* remove default focus border */
+}
+
+#vars-highlight {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    font-family: monospace;
+    font-size: 14px;
+    line-height: 1.4em;
+    padding: 10px;
+    pointer-events: none;
+    white-space: pre;
+    overflow: auto;
+    scrollbar-width: none; /* Firefox */
+}
+#vars-highlight::-webkit-scrollbar { /* Chrome/Edge */
+    display: none;
+}
+
+/* Syntax colors */
+.string { color: #CE9178; }
+.number { color: #B5CEA8; }
+.boolean { color: #569CD6; }
+.null { color: #569CD6; }
+.key { color: #9CDCFE; } 
+
+/* highlight search matches */
+.editor-wrapper mark {
+    background: var(--warning-color);
+    color: #000;
+}
+
+/* search box */
+.search-box {
+    padding: 6px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-color);
+    background-color: var(--element-bg);
+    color: var(--text-color);
+    margin-right: 10px;
+    width: 200px;
+    transition: var(--transition);
+}
+
+.search-box:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(58, 134, 255, 0.2);
+} 

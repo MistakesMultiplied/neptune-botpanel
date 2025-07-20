@@ -10,6 +10,8 @@ const sandboxManager = require('./sandboxManager');
 const { state, BotStatus } = require('../shared/state');
 const { exec } = require('child_process');
 
+const CONFIG_FILE_PATH = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Team Fortress 2\\Amalgam\\default.json';
+
 class neptunePanelServer {
     constructor() {
         this.app = express();
@@ -193,6 +195,33 @@ class neptunePanelServer {
             }
             state.saveConfig();
             res.json({ success: true, message: 'Settings updated', settings: state.config });
+        });
+
+        this.app.get('/api/vars-config', (req, res) => {
+            fs.readFile(CONFIG_FILE_PATH, 'utf8', (err, data) => {
+                if (err) {
+                    if (err.code === 'ENOENT') {
+                        return res.type('application/json').send('{}');
+                    }
+                    console.error('Failed to read vars config:', err.message);
+                    return res.status(500).json({ error: 'Failed to read config file' });
+                }
+                res.type('application/json').send(data || '{}');
+            });
+        });
+
+        this.app.post('/api/vars-config', (req, res) => {
+            const { content } = req.body;
+            if (typeof content !== 'string') {
+                return res.status(400).json({ error: 'Invalid content' });
+            }
+            fs.writeFile(CONFIG_FILE_PATH, content, 'utf8', (err) => {
+                if (err) {
+                    console.error('Failed to save vars config:', err.message);
+                    return res.status(500).json({ error: 'Failed to save config file' });
+                }
+                res.json({ success: true });
+            });
         });
     }
     

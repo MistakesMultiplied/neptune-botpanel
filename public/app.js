@@ -11,7 +11,9 @@ const state = {
     autoRestartEnabled: false,
     restartingBots: [],
     activeBots: new Set(),
-    botsStarting: new Set()
+    botsStarting: new Set(),
+    searchTerm: '',
+    searchBoxVisible: false
 };
 
 const elements = {
@@ -19,7 +21,8 @@ const elements = {
         dashboard: document.getElementById('dashboard-page'),
         settings: document.getElementById('settings-page'),
         logs: document.getElementById('logs-page'),
-        guides: document.getElementById('guides-page')
+        guides: document.getElementById('guides-page'),
+        'vars-editor': document.getElementById('vars-editor-page')
     },
     botGrid: document.querySelector('.bot-grid'),
     botCommands: document.getElementById('bot-commands'),
@@ -29,6 +32,11 @@ const elements = {
     activeBots: document.getElementById('active-bots'),
     botQuota: document.getElementById('bot-quota'),
     logs: document.getElementById('logs'),
+    // Vars editor elements
+    varsEditor: document.getElementById('vars-editor'),
+    varsHighlight: document.getElementById('vars-highlight'),
+    varsLineNumbers: document.getElementById('vars-line-numbers'),
+    varsSearchBox: document.getElementById('vars-search-box'),
     selectedBotNumber: document.getElementById('selected-bot-number'),
     commandInput: document.getElementById('command-input'),
     globalCommandInput: document.getElementById('global-command-input'),
@@ -241,6 +249,53 @@ function setupEventListeners() {
         state.settings = settings;
         updateSettingsForm(settings);
     });
+
+    // Vars editor buttons
+    const varsSaveBtn = document.getElementById('vars-save');
+    const varsReloadBtn = document.getElementById('vars-reload');
+    if (varsSaveBtn) varsSaveBtn.addEventListener('click', saveVarsConfig);
+    if (varsReloadBtn) varsReloadBtn.addEventListener('click', loadVarsConfig);
+
+    if (elements.varsEditor) {
+        elements.varsEditor.addEventListener('input', updateVarsHighlight);
+        elements.varsEditor.addEventListener('scroll', () => {
+            elements.varsHighlight.scrollTop = elements.varsEditor.scrollTop;
+            elements.varsHighlight.scrollLeft = elements.varsEditor.scrollLeft;
+            elements.varsLineNumbers.scrollTop = elements.varsEditor.scrollTop;
+        });
+        // intercept Ctrl+F
+        elements.varsEditor.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'f') {
+                e.preventDefault();
+                toggleSearchBox();
+            } else if (e.key === 'Escape' && state.searchBoxVisible) {
+                hideSearchBox();
+            } else if (e.key === 'Enter' && state.searchBoxVisible) {
+                performSearch();
+            }
+        });
+    }
+
+    if (elements.varsSearchBox) {
+        elements.varsSearchBox.addEventListener('input', performSearch);
+        elements.varsSearchBox.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                hideSearchBox();
+                elements.varsEditor.focus();
+            } else if (e.key === 'Enter') {
+                performSearch();
+                e.preventDefault();
+            }
+        });
+    }
+
+    // Redirect wheel on line numbers
+    if (elements.varsLineNumbers) {
+        elements.varsLineNumbers.addEventListener('wheel', (e) => {
+            elements.varsEditor.scrollTop += e.deltaY;
+            e.preventDefault();
+        });
+    }
 }
 
 function navigateTo(page) {
@@ -258,6 +313,10 @@ function navigateTo(page) {
     });
     
     state.activePage = page;
+
+    if (page === 'vars-editor') {
+        loadVarsConfig();
+    }
 }
 
 function createInitialBotCards() {
@@ -957,6 +1016,117 @@ function showContributeModal() {
     if (contributeModal) {
         contributeModal.classList.add('active');
     }
+}
+
+/* Search box helpers */
+state.searchTerm = '';
+state.searchBoxVisible = false;
+
+function toggleSearchBox() {
+    if (state.searchBoxVisible) {
+        hideSearchBox();
+    } else {
+        showSearchBox();
+    }
+}
+
+function showSearchBox() {
+    if (!elements.varsSearchBox) return;
+    elements.varsSearchBox.style.display = 'block';
+    elements.varsSearchBox.focus();
+    elements.varsSearchBox.select();
+    state.searchBoxVisible = true;
+}
+
+function hideSearchBox() {
+    if (!elements.varsSearchBox) return;
+    elements.varsSearchBox.style.display = 'none';
+    state.searchBoxVisible = false;
+    state.searchTerm = '';
+    updateVarsHighlight();
+}
+
+function performSearch() {
+    if (!elements.varsSearchBox) return;
+    state.searchTerm = elements.varsSearchBox.value;
+    updateVarsHighlight();
+}
+
+/* ================= Vars Editor ================= */
+function syntaxHighlight(json, searchTerm = '') {
+    json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let highlighted = json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, match => {
+        let cls = 'number';
+        if (/^"/.test(match)) {
+            cls = /:$/.test(match) ? 'key' : 'string';
+        } else if (/true|false/.test(match)) {
+            cls = 'boolean';
+        } else if (/null/.test(match)) {
+            cls = 'null';
+        }
+        return `<span class=\"${cls}\">${match}</span>`;
+    });
+
+    if (searchTerm && searchTerm.length > 0) {
+        const escaped = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(escaped, 'gi');
+        highlighted = highlighted.replace(regex, match => `<mark>${match}</mark>`);
+    }
+    return highlighted;
+}
+
+function updateLineNumbers(text) {
+    if (!elements.varsLineNumbers) return;
+    const lines = text.split('\n').length;
+    let nums = '';
+    for (let i = 1; i <= lines; i++) {
+        nums += i + '<br/>';
+    }
+    elements.varsLineNumbers.innerHTML = nums;
+}
+
+function updateVarsHighlight() {
+    if (!elements.varsEditor || !elements.varsHighlight) return;
+    const text = elements.varsEditor.value;
+    elements.varsHighlight.innerHTML = syntaxHighlight(text, state.searchTerm);
+    updateLineNumbers(text);
+}
+
+function loadVarsConfig() {
+    fetch('/api/vars-config')
+        .then(res => res.text())
+        .then(text => {
+            if (elements.varsEditor) {
+                elements.varsEditor.value = text;
+                updateVarsHighlight();
+            }
+        })
+        .catch(err => {
+            console.error('Failed to load vars config:', err);
+            showNotification('Failed to load config');
+        });
+}
+
+function saveVarsConfig() {
+    if (!elements.varsEditor) return;
+    const content = elements.varsEditor.value;
+    fetch('/api/vars-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.success) {
+            showNotification('Config saved successfully');
+        } else {
+            showNotification('Failed to save config');
+        }
+    })
+    .catch(err => {
+        console.error('Failed to save vars config:', err);
+        showNotification('Failed to save config');
+    });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
