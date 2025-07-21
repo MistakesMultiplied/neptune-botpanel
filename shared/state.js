@@ -3,26 +3,30 @@ const path = require('path');
 
 // Load configuration from file
 function loadConfig() {
+    const defaults = {
+        maxConcurrentStarts: 2,
+        botQuota: 10,
+        tf2StartDelay: 5000,
+        injectDelay: 5,
+        enableTextmodeDelay: false,
+        textmodeDelay: 1.5,
+        autoRestartEnabled: false,
+        sandboxiePath: 'C:\\Program Files\\Sandboxie-Plus\\Start.exe',
+        steamPath: 'C:\\Program Files (x86)\\Steam\\steam.exe',
+        tf2Path: 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Team Fortress 2\\tf_win64.exe',
+        pipeName: '\\\\.\\pipe\\AwootismBotPipe',
+        accountsFile: path.join(__dirname, '../files/accounts.txt')
+    };
+
     try {
         const configPath = path.join(__dirname, '../config.json');
-        const config = JSON.parse(readFileSync(configPath, 'utf8'));
-        return config;
+        const loadedConfig = JSON.parse(readFileSync(configPath, 'utf8'));
+        
+        // Merge loaded config with defaults to ensure all required fields exist
+        return { ...defaults, ...loadedConfig };
     } catch (error) {
         console.error('Error loading config, using defaults:', error.message);
-        return {
-            maxConcurrentStarts: 2,
-            botQuota: 10,
-            tf2StartDelay: 5000,
-            injectDelay: 5,
-            enableTextmodeDelay: false,
-            textmodeDelay: 1.5,
-            autoRestartEnabled: false,
-            sandboxiePath: 'C:\\Program Files\\Sandboxie-Plus\\Start.exe',
-            steamPath: 'C:\\Program Files (x86)\\Steam\\steam.exe',
-            tf2Path: 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Team Fortress 2\\tf_win64.exe',
-            pipeName: '\\\\.\\pipe\\AwootismBotPipe',
-            accountsFile: path.join(__dirname, '../files/accounts.txt')
-        };
+        return defaults;
     }
 }
 
